@@ -1,0 +1,75 @@
+# Every published port is bound to 127.0.0.1 on purpose: the dashboard and its
+# API have no login yet. Do not widen these until auth exists.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: office
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-office}
+      POSTGRES_DB: virtual_office
+    # Runs alphabetically on an empty volume: schema.sql, then seed.sql.
+    # It does NOT re-run on an existing volume — see the README.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U office -d virtual_office"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      N8N_SECURE_COOKIE: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      GENERIC_TIMEZONE: Asia/Manila
+      TZ: Asia/Manila
+      # Referenced by the workflow exports as $env.*
+      BACKEND_URL: http://backend:4000
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+    volumes:
+      - n8ndata:/home/node/.n8n
+    ports:
+      - "127.0.0.1:5678:5678"
+    depends_on:
+      - backend
+      - ollama
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgres://office:${POSTGRES_PASSWORD:-office}@postgres:5432/virtual_office
+      PORT: 4000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+      N8N_RETRY_WEBHOOK_URL: http://n8n:5678/webhook/sales-lead
+      N8N_DISPATCH_WEBHOOK_URL: http://n8n:5678/webhook/approval-dispatch
+      TZ: Asia/Manila
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  ollama:
+  n8ndata:

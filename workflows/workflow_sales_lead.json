@@ -1,0 +1,267 @@
+{
+  "name": "Sales Lead → Draft → Approval",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sales-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Lead Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -620,
+        300
+      ],
+      "webhookId": "sales-lead",
+      "notes": "POST /webhook/sales-lead. A fresh lead sends {business_code, message, lead_id, recipient}. A rejected draft comes back here too, with feedback + previous_draft."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/checkout",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ business_code: $json.body.business_code || 'BIZ_ELEC', department: 'Sales', task: 'Lead: ' + ($json.body.message || '').slice(0, 120) }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Checkout Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -400,
+        300
+      ],
+      "notes": "423 means the agent is paused. neverError keeps the status code so the next node can abort cleanly."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c1",
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Agent Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build the prompt. On a retry the rejected draft and the reviewer's feedback\n// come in on the webhook body, so the model revises instead of starting over.\nconst lead = $('Lead Webhook').item.json.body ?? {};\nconst agent = $('Checkout Agent').item.json.body.agent;\n\nconst base = [\n  'You are ' + agent.name + ', the ' + agent.department + ' agent for a Philippine service business.',\n  'Reply to the customer in warm, professional English. Quote prices in PHP.',\n  'Keep it under 120 words. Output only the reply text.',\n  '',\n  'Customer message: ' + (lead.message ?? ''),\n].join('\\n');\n\nconst revision = lead.feedback\n  ? ['', 'Your previous draft was rejected by a human reviewer.',\n     'Previous draft: ' + lead.previous_draft,\n     'Reviewer feedback: ' + lead.feedback,\n     'Rewrite it addressing that feedback.'].join('\\n')\n  : '';\n\nreturn { json: { prompt: base + revision, agent_id: agent.id, lead } };"
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OLLAMA_URL }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL || 'llama3.1', prompt: $json.prompt, stream: false }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Ollama Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/approvals",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ agent_id: $('Build Prompt').item.json.agent_id, payload: { type: 'sales_reply', title: 'Reply to ' + ($('Build Prompt').item.json.lead.customer_name || $('Build Prompt').item.json.lead.recipient || 'new lead'), draft: ($json.response || '').trim(), channel: $('Build Prompt').item.json.lead.channel || 'email', recipient: $('Build Prompt').item.json.lead.recipient || null, source: $('Lead Webhook').item.json.body } }) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "File For Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        200
+      ],
+      "notes": "`source` is the original webhook body — it is what the backend replays if a human rejects the draft."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, approval_id: $json.approval.id, status: 'PENDING' }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Respond Queued",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: 'agent paused — run aborted' }) }}",
+        "options": {
+          "responseCode": 423
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Abort — Agent Paused",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        60,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Lead Webhook": {
+      "main": [
+        [
+          {
+            "node": "Checkout Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checkout Agent": {
+      "main": [
+        [
+          {
+            "node": "Agent Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Available?": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Abort — Agent Paused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Ollama Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Draft": {
+      "main": [
+        [
+          {
+            "node": "File For Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File For Approval": {
+      "main": [
+        [
+          {
+            "node": "Respond Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "virtual-office-dev"
+  }
+}

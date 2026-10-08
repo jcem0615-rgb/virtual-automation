@@ -1,0 +1,17 @@
+{
+  "name": "virtual-office-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "2.8.5",
+    "express": "4.21.2",
+    "pg": "8.13.1",
+    "socket.io": "4.8.1"
+  }
+}
