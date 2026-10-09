@@ -20,6 +20,11 @@ import {
   missingCredentials, REQUIRED_CREDENTIALS, credentialsKeyIsSet,
 } from './secrets.js';
 import {
+  BUSINESS_LINES, BUSINESS_TYPES, businessLine, titlesFor, codeFromName,
+} from './business-lines.js';
+import { registerCommerce } from './commerce.js';
+import { registerLive } from './live.js';
+import {
   COOKIE_NAME, readCookie, resolveSession, requireUser, scopeFor,
   authenticate, createSession, destroySession, setSessionCookie,
   clearSessionCookie, secretsMatch, purgeExpiredSessions,
@@ -32,6 +37,8 @@ const N8N_RETRY_WEBHOOK_URL = process.env.N8N_RETRY_WEBHOOK_URL ?? '';
 const N8N_DISPATCH_WEBHOOK_URL = process.env.N8N_DISPATCH_WEBHOOK_URL ?? '';
 const N8N_POST_SYNC_WEBHOOK_URL = process.env.N8N_POST_SYNC_WEBHOOK_URL ?? '';
 const N8N_PRODUCT_SYNC_WEBHOOK_URL = process.env.N8N_PRODUCT_SYNC_WEBHOOK_URL ?? '';
+const N8N_CHAT_WEBHOOK_URL = process.env.N8N_CHAT_WEBHOOK_URL ?? '';
+const N8N_LIVE_WEBHOOK_URL = process.env.N8N_LIVE_WEBHOOK_URL ?? '';
 
 const app = express();
 
@@ -278,6 +285,42 @@ async function callWebhook(url, body, label) {
 const wrap = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
 
+/**
+ * The check every /api/internal/* write makes before it writes: a suspended
+ * business is closed to n8n the same way a paused agent is, so a run against
+ * one aborts with 423 instead of quietly filing work nobody can act on.
+ * Returns the body to send back, or null when the floor is open.
+ */
+async function internalGate(businessId) {
+  const { rows } = await q(`SELECT is_active FROM businesses WHERE id = $1`, [businessId]);
+  if (!rows[0]) throw new HttpError(404, 'business not found');
+  if (rows[0].is_active) return null;
+  return { ok: false, status: 'SUSPENDED',
+    error: 'this business is suspended — abort this run' };
+}
+
+// ------------------------------------------------------- approval types
+// Every kind of outbound work says in one place which workflow sends it,
+// what that workflow needs handed to it, and how to put the rows back if it
+// is turned down or nothing picks the job up. The gate itself — PENDING ->
+// APPROVED, one guarded UPDATE — is the same for all of them, so it lives in
+// the two routes below and nowhere else.
+//
+// A handler is { webhook, label, enrich, onDispatchFailed, onRejected }:
+//   webhook()                 which n8n webhook to post to
+//   enrich(payload)           extra fields that workflow needs
+//   onDispatchFailed(payload) nothing took the job: stop showing 'sending'
+//   onRejected(payload, fb)   a human said no; returns what to tell them
+// A kind with an onRejected is not replayed through the model, because there
+// is nothing to revise — the answer was no.
+const approvalTypes = new Map();
+
+function registerApprovalType(type, handler) {
+  approvalTypes.set(type, handler);
+}
+
+const handlerFor = (payload) => approvalTypes.get(payload?.type) ?? null;
+
 // ----------------------------------------------------------------- auth
 
 app.get('/api/health', wrap(async (_req, res) => {
@@ -319,6 +362,35 @@ function publicUser(user) {
   };
 }
 
+/**
+ * Open a floor: the row, its ten desks with their skills, its payment rules,
+ * and the role titles that suit the trade. Both the owner's "add a business"
+ * and the operator's portal come through here, so every office is laid out
+ * and provisioned the same way whoever asked for it.
+ */
+async function openFloor(client, { code, name, businessType, timezone, currency, createdBy }) {
+  const { rows } = await client.query(
+    `INSERT INTO businesses (code, name, business_type, timezone, currency, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, code, name, business_type, timezone, currency, is_active, created_at`,
+    [code, name, businessType, timezone, currency, createdBy],
+  );
+  const business = rows[0];
+  await client.query('SELECT provision_business_agents($1)', [business.id]);
+
+  // Same desks, named for the trade. The departments do not change, so every
+  // rule, workflow and filter that keys off a department still works.
+  const titles = titlesFor(businessType);
+  for (const [department, title] of Object.entries(titles)) {
+    await client.query(
+      `UPDATE agents SET role_title = $3, name = $3
+        WHERE business_id = $1 AND department = $2`,
+      [business.id, department, title],
+    );
+  }
+  return business;
+}
+
 async function readBusinesses(user) {
   // The tenant key on this table is `id`, not `business_id`.
   const where = businessClause(user.businessIds ?? [], { column: 'id' });
@@ -338,6 +410,85 @@ app.use('/api/action-logs', requireUser);
 app.use('/api/state', requireUser);
 
 // ------------------------------------------------------------ public REST
+
+/**
+ * Open another office. An owner of one floor may start another — a second
+ * line of business is their decision, not the platform operator's — and they
+ * own what they opened. The new floor is a tenant like any other: its own
+ * desks, its own catalogue, its own accounts, and nothing of it visible from
+ * the floor it was started from except that the same person can switch to it.
+ *
+ * The platform operator still sees it in the portal, because watching every
+ * floor is that account's job; it still cannot read a word of its work.
+ */
+app.post('/api/businesses', wrap(async (req, res) => {
+  // Being an owner somewhere is what earns this. A reviewer cannot open a
+  // floor, and neither can the operator — holding no membership, it would be
+  // opening an office it could not then read.
+  const ownsSomething = (req.user.businessIds ?? [])
+    .some((id) => roleFor(req.user, id) === 'owner');
+  if (!ownsSomething) {
+    throw new HttpError(403, 'only the owner of an office can open another one');
+  }
+
+  const name = String(req.body?.name ?? '').trim();
+  if (name.length < 2) throw new HttpError(400, 'give the office a name');
+  if (name.length > 120) throw new HttpError(400, 'that name is too long');
+  const businessType = String(req.body?.business_type ?? 'general');
+  if (!BUSINESS_TYPES.includes(businessType)) throw new HttpError(400, 'unknown business line');
+  const timezone = String(req.body?.timezone ?? 'Asia/Manila');
+  const currency = String(req.body?.currency ?? 'PHP').toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) throw new HttpError(400, 'currency must be a 3-letter code');
+
+  // The code is derived rather than asked for; a clash just takes the next one.
+  let business = null;
+  let lastError = null;
+  for (let attempt = 0; attempt < 12 && !business; attempt += 1) {
+    const code = codeFromName(name, attempt);
+    try {
+      business = await tx(async (client) => {
+        const opened = await openFloor(client, {
+          code, name, businessType, timezone, currency, createdBy: req.user.id,
+        });
+        await client.query(
+          `INSERT INTO user_businesses (user_id, business_id, role)
+           VALUES ($1, $2, 'owner')
+           ON CONFLICT (user_id, business_id) DO UPDATE SET role = 'owner'`,
+          [req.user.id, opened.id],
+        );
+        await logAction(client, {
+          businessId: opened.id,
+          action: 'BUSINESS_OPENED',
+          actor: req.user.email,
+          actorUserId: req.user.id,
+          detail: { code: opened.code, business_type: businessType, name },
+        });
+        return opened;
+      });
+    } catch (err) {
+      if (err.code !== '23505') throw err;
+      lastError = err;
+    }
+  }
+  if (!business) {
+    throw new HttpError(409, 'could not find a free code for that name', { detail: lastError?.detail });
+  }
+
+  // REST picks the new floor up on the next request — scope is read from the
+  // database each time — but the socket joined its rooms when it connected
+  // and knows nothing of it, so the client is told to reconnect.
+  res.status(201).json({
+    ok: true,
+    business: { ...business, role: 'owner' },
+    line: businessLine(businessType),
+    reconnect: true,
+  });
+}));
+
+/** The lines of business a floor can be opened for, for the picker. */
+app.get('/api/business-lines', requireUser, wrap(async (_req, res) => {
+  res.json({ lines: BUSINESS_LINES.map(({ key, label, blurb }) => ({ key, label, blurb })) });
+}));
 
 app.get('/api/businesses', wrap(async (req, res) => {
   res.json(await readBusinesses(req.user));
@@ -423,39 +574,25 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
       { status: current.status });
   }
 
-  // Dispatch happens only after the row is committed as APPROVED. A post edit
-  // goes to its own workflow, which updates each platform copy in place.
+  // Dispatch happens only after the row is committed as APPROVED, and which
+  // workflow it goes to is the registered kind's business, not this route's.
   const payload = outcome.payload_json ?? {};
-  const isPostUpdate = payload.type === 'post_update' || payload.type === 'post_publish';
-  const isProduct = payload.type === 'product_publish' || payload.type === 'product_update';
-  const target = isProduct ? N8N_PRODUCT_SYNC_WEBHOOK_URL
-    : isPostUpdate ? N8N_POST_SYNC_WEBHOOK_URL
-    : N8N_DISPATCH_WEBHOOK_URL;
+  const handler = handlerFor(payload);
+  const target = handler?.webhook?.() ?? N8N_DISPATCH_WEBHOOK_URL;
+  const extra = handler?.enrich ? await handler.enrich(payload) : {};
   const dispatch = await callWebhook(target, {
     approval_id: outcome.id,
     business_id: outcome.business_id,
     agent_id: outcome.agent_id,
     payload,
-    ...(isPostUpdate ? { post: await readPost(payload.post_id) } : {}),
-    ...(isProduct ? { product: await readProduct(payload.product_id) } : {}),
-  }, isProduct ? 'product sync' : isPostUpdate ? 'post sync' : 'dispatch');
+    ...extra,
+  }, handler?.label ?? 'dispatch');
 
-  if (isProduct && !dispatch.ok) {
-    await q(
-      `UPDATE product_listings SET state = 'FAILED', last_error = $2
-        WHERE product_id = $1 AND state IN ('PUBLISH_PENDING', 'UPDATE_PENDING')`,
-      [payload.product_id, 'the job could not be queued'],
-    ).catch(() => {});
-  }
-
-  // If nothing took the job, the platforms are not going to change, so do not
-  // leave the post looking like an update is on its way.
-  if (isPostUpdate && !dispatch.ok) {
-    await q(
-      `UPDATE social_post_targets SET state = 'FAILED', last_error = $2
-        WHERE post_id = $1 AND state IN ('UPDATE_PENDING', 'PUBLISH_PENDING')`,
-      [payload.post_id, 'the job could not be queued'],
-    ).catch(() => {});
+  // Nothing took the job, so the platforms are not going to change. Clear
+  // whatever was showing as on its way, or it reads as sent forever.
+  if (!dispatch.ok && handler?.onDispatchFailed) {
+    await Promise.resolve(handler.onDispatchFailed(payload, 'the job could not be queued'))
+      .catch((err) => console.error(`[${payload.type}] rollback failed:`, err.message));
   }
 
   res.json({ ok: true, approval_id: outcome.id, dispatch });
@@ -482,11 +619,15 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
     const approval = rows[0];
     if (!approval) return null;
 
+    // A kind that handles its own rejection has nothing to revise, so its
+    // desk goes back to idle rather than sitting at WORKING waiting for a
+    // revision that is never coming.
+    const handled = Boolean(handlerFor(approval.payload_json)?.onRejected);
     const agent = await settleAgent(client, {
       agentId: approval.agent_id,
       businessId: approval.business_id,
-      status: 'WORKING',
-      message: 'Revising after feedback',
+      status: handled ? 'IDLE' : 'WORKING',
+      message: handled ? 'Turned down' : 'Revising after feedback',
     });
 
     await logAction(client, {
@@ -509,50 +650,23 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
       { status: current.status });
   }
 
-  // A rejected post edit is simply dropped: the platforms were never touched,
-  // so the live copies stay as they are.
-  const kind = outcome.payload_json?.type;
-  if (kind === 'product_publish' || kind === 'product_update') {
-    const productId = outcome.payload_json.product_id;
-    await tx(async (client) => {
-      await client.query(
-        `UPDATE product_listings SET state = 'LISTED'
-          WHERE product_id = $1 AND state = 'UPDATE_PENDING'`, [productId]);
-      await client.query(
-        `UPDATE product_listings SET state = 'NOT_LISTED'
-          WHERE product_id = $1 AND state = 'PUBLISH_PENDING'`, [productId]);
-    }).catch((err) => console.error('[products] could not roll back:', err.message));
-    res.json({ ok: true, approval_id: outcome.id, product_update: 'discarded' });
-    return;
-  }
-
-  const postType = outcome.payload_json?.type;
-  if (postType === 'post_update' || postType === 'post_publish') {
-    const postId = outcome.payload_json.post_id;
-    await tx(async (client) => {
-      // An edit that was chasing a live post leaves it live; one that had not
-      // gone out yet goes back to not published.
-      await client.query(
-        `UPDATE social_post_targets SET state = 'PUBLISHED'
-          WHERE post_id = $1 AND state = 'UPDATE_PENDING'`, [postId]);
-      await client.query(
-        `UPDATE social_post_targets SET state = 'NOT_PUBLISHED'
-          WHERE post_id = $1 AND state = 'PUBLISH_PENDING'`, [postId]);
-      await client.query(
-        `UPDATE social_posts SET status = CASE
-             WHEN EXISTS (SELECT 1 FROM social_post_targets
-                           WHERE post_id = $1 AND state = 'PUBLISHED')
-             THEN 'PUBLISHED' ELSE 'DRAFT' END
-          WHERE id = $1`, [postId]);
-    }).catch((err) => console.error('[posts] could not roll back:', err.message));
-    res.json({ ok: true, approval_id: outcome.id, post_update: 'discarded' });
+  // A kind that knows what its own no means puts its rows back and says so.
+  // Nothing was ever sent, so there is nothing out there to undo.
+  const payload = outcome.payload_json ?? {};
+  const handler = handlerFor(payload);
+  if (handler?.onRejected) {
+    const said = await Promise.resolve(handler.onRejected(payload, feedback))
+      .catch((err) => {
+        console.error(`[${payload.type}] rollback failed:`, err.message);
+        return { rollback: 'failed' };
+      });
+    res.json({ ok: true, approval_id: outcome.id, ...(said ?? {}) });
     return;
   }
 
   // A paused agent gets no retry — PAUSED wins over the replay too.
   let retry = { ok: false, skipped: true, reason: 'agent paused' };
   if (outcome.retried) {
-    const payload = outcome.payload_json ?? {};
     retry = await callWebhook(N8N_RETRY_WEBHOOK_URL, {
       ...(payload.source ?? {}),
       business_id: outcome.business_id,
@@ -1239,6 +1353,10 @@ app.get('/api/products/:id', wrap(async (req, res) => {
 app.post('/api/products', wrap(async (req, res) => {
   const businessId = assertUuid(req.body?.business_id, 'business_id');
   assertInScope(req.user, businessId);
+  // The catalogue is what the business sells and what it sells it for, so
+  // writing to it is an owner's job. A reviewer still sees all of it and
+  // still approves what goes out; they just do not set the price.
+  requireOwner(req.user, businessId);
   const fields = readProductBody(req.body);
 
   const product = await tx(async (client) => {
@@ -1278,8 +1396,19 @@ app.patch('/api/products/:id', wrap(async (req, res) => {
   const existing = await readProduct(productId);
   if (!existing) throw new HttpError(404, 'product not found');
   assertInScope(req.user, existing.business_id);
+  requireOwner(req.user, existing.business_id);
   const fields = readProductBody(req.body, { partial: true });
   if (!Object.keys(fields).length) throw new HttpError(400, 'nothing to change');
+
+  // What actually changed, in words, so the person approving a price cut sees
+  // the old number next to the new one instead of just the new one.
+  const changes = Object.entries(fields)
+    .filter(([name]) => !['images', 'platform_meta'].includes(name))
+    .map(([name, value]) => {
+      const was = existing[name];
+      return String(was) === String(value) ? null : `${name}: ${was} -> ${value}`;
+    })
+    .filter(Boolean);
 
   const sets = [];
   const params = [productId];
@@ -1299,7 +1428,7 @@ app.patch('/api/products/:id', wrap(async (req, res) => {
         action: 'PRODUCT_EDITED',
         actor: req.user.email,
         actorUserId: req.user.id,
-        detail: { sku: existing.sku, fields: Object.keys(fields) },
+        detail: { sku: existing.sku, changes },
       });
       return { approvalId: null };
     }
@@ -1310,7 +1439,10 @@ app.patch('/api/products/:id', wrap(async (req, res) => {
       [existing.business_id, deskId, JSON.stringify({
         type: 'product_update',
         title: `Update "${existing.name}" on ${live.map((l) => l.label).join(', ')}`,
-        draft: `${fields.name ?? existing.name} — ${fields.currency ?? existing.currency} ${fields.price ?? existing.price}\n\n${fields.description ?? existing.description}`,
+        draft: `${fields.name ?? existing.name} — ${fields.currency ?? existing.currency} ${fields.price ?? existing.price}, `
+             + `${fields.stock ?? existing.stock} in stock\n\n`
+             + (changes.length ? `Changing:\n${changes.join('\n')}\n\n` : '')
+             + `${fields.description ?? existing.description}`,
         channel: live[0].platform,
         product_id: productId,
         account_ids: live.map((l) => l.account_id),
@@ -1336,7 +1468,7 @@ app.patch('/api/products/:id', wrap(async (req, res) => {
       action: 'PRODUCT_UPDATE_SUBMITTED',
       actor: req.user.email,
       actorUserId: req.user.id,
-      detail: { sku: existing.sku, accounts: live.length },
+      detail: { sku: existing.sku, accounts: live.length, changes },
     });
     return { approvalId: rows[0].id };
   });
@@ -1350,6 +1482,108 @@ app.patch('/api/products/:id', wrap(async (req, res) => {
 }));
 
 /**
+ * Delete a product. Taking a listing down is itself something a marketplace
+ * sees, so a product that is live somewhere cannot simply vanish from here:
+ * the delist is filed, the shops are told, and the row goes when they have
+ * all answered. A product that is live nowhere is just a row, and goes now.
+ *
+ * Stock is not a reason to refuse — a shop stops selling things it still has
+ * — but an unpaid order against it is, because deleting the product would
+ * leave that order pointing at nothing.
+ */
+app.delete('/api/products/:id', wrap(async (req, res) => {
+  const productId = assertUuid(req.params.id, 'product_id');
+  const existing = await readProduct(productId);
+  if (!existing) throw new HttpError(404, 'product not found');
+  assertInScope(req.user, existing.business_id);
+  requireOwner(req.user, existing.business_id);
+
+  const { rows: owed } = await q(
+    `SELECT count(*)::int AS open FROM order_items i
+       JOIN orders o ON o.id = i.order_id
+      WHERE i.product_id = $1 AND o.status IN ('UNPAID','PAID','READY_TO_SHIP','SHIPPED')`,
+    [productId]);
+  if (owed[0].open > 0) {
+    throw new HttpError(409,
+      `${owed[0].open} order(s) are still open against ${existing.sku} — finish or cancel them first`);
+  }
+  const { rows: held } = await q(
+    `SELECT count(*)::int AS held FROM live_claims c
+       JOIN live_basket_items b ON b.id = c.basket_item_id
+      WHERE b.product_id = $1 AND c.status IN ('HELD','CHECKOUT_SENT')`,
+    [productId]);
+  if (held[0].held > 0) {
+    throw new HttpError(409,
+      `${held[0].held} live claim(s) are holding ${existing.sku} — let them run out first`);
+  }
+
+  const live = existing.listings.filter((l) => ['LISTED', 'UPDATE_PENDING'].includes(l.state));
+  if (!live.length) {
+    await tx(async (client) => {
+      await client.query(`DELETE FROM products WHERE id = $1 AND business_id = ANY($2::uuid[])`,
+        [productId, req.user.businessIds]);
+      await logAction(client, {
+        businessId: existing.business_id,
+        action: 'PRODUCT_DELETED',
+        actor: req.user.email,
+        actorUserId: req.user.id,
+        detail: { sku: existing.sku, name: existing.name },
+      });
+    });
+    res.json({ ok: true, deleted: true });
+    return;
+  }
+
+  const deskId = await deskFor(existing.business_id);
+  const approval = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO approvals (business_id, agent_id, payload_json)
+       VALUES ($1, $2, $3::jsonb) RETURNING id`,
+      [existing.business_id, deskId, JSON.stringify({
+        type: 'product_delist',
+        title: `Take "${existing.name}" off ${live.map((l) => l.label).join(', ')}`,
+        draft: `${existing.name} (${existing.sku}) comes down from `
+             + `${live.map((l) => l.label).join(', ')} and is deleted from the catalogue here.\n\n`
+             + `${existing.stock} are still on the shelf.`,
+        channel: live[0].platform,
+        product_id: productId,
+        account_ids: live.map((l) => l.account_id),
+        delete_after: true,
+        source: { product_id: productId, requested_by: req.user.email },
+      })],
+    );
+    await client.query(
+      `UPDATE product_listings SET state = 'UPDATE_PENDING', last_error = NULL
+        WHERE product_id = $1 AND account_id = ANY($2::uuid[])`,
+      [productId, live.map((l) => l.account_id)]);
+    await settleAgent(client, {
+      agentId: deskId,
+      businessId: existing.business_id,
+      status: 'AWAITING_APPROVAL',
+      message: `Delist waiting: ${existing.name}`.slice(0, 500),
+    });
+    await logAction(client, {
+      businessId: existing.business_id,
+      agentId: deskId,
+      approvalId: rows[0].id,
+      action: 'PRODUCT_DELIST_SUBMITTED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { sku: existing.sku, accounts: live.map((l) => l.label) },
+    });
+    return rows[0];
+  });
+
+  res.json({
+    ok: true,
+    deleted: false,
+    needs_approval: true,
+    approval_id: approval.id,
+    note: `it is still live on ${live.length} shop(s); it goes when they confirm`,
+  });
+}));
+
+/**
  * List a product on the accounts its owner picked. Like everything else that
  * leaves the building, it waits for a human.
  */
@@ -1358,6 +1592,7 @@ app.post('/api/products/:id/publish', wrap(async (req, res) => {
   const product = await readProduct(productId);
   if (!product) throw new HttpError(404, 'product not found');
   assertInScope(req.user, product.business_id);
+  requireOwner(req.user, product.business_id);
 
   const accountIds = req.body?.account_ids;
   if (!Array.isArray(accountIds) || !accountIds.length) {
@@ -1452,6 +1687,83 @@ app.post('/api/products/:id/publish', wrap(async (req, res) => {
   });
 }));
 
+// ------------------------------------------- what the gate does with each kind
+// Registered here, after the readers they use exist. A post edit and a
+// product listing each go to their own workflow and each know how to put
+// their rows back; everything else falls through to the dispatch workflow,
+// which routes by `channel`.
+
+const postRollback = (postId, failed) => tx(async (client) => {
+  // An edit that was chasing a live post leaves it live; one that had not
+  // gone out yet goes back to not published.
+  await client.query(
+    `UPDATE social_post_targets SET state = $2, last_error = $3
+      WHERE post_id = $1 AND state = 'UPDATE_PENDING'`,
+    [postId, failed ? 'FAILED' : 'PUBLISHED', failed ?? null]);
+  await client.query(
+    `UPDATE social_post_targets SET state = $2, last_error = $3
+      WHERE post_id = $1 AND state = 'PUBLISH_PENDING'`,
+    [postId, failed ? 'FAILED' : 'NOT_PUBLISHED', failed ?? null]);
+  await client.query(
+    `UPDATE social_posts SET status = CASE
+         WHEN EXISTS (SELECT 1 FROM social_post_targets
+                       WHERE post_id = $1 AND state = 'PUBLISHED')
+         THEN 'PUBLISHED' ELSE 'DRAFT' END
+      WHERE id = $1`, [postId]);
+});
+
+const productRollback = (productId, failed) => tx(async (client) => {
+  await client.query(
+    `UPDATE product_listings SET state = $2, last_error = $3
+      WHERE product_id = $1 AND state = 'UPDATE_PENDING'`,
+    [productId, failed ? 'FAILED' : 'LISTED', failed ?? null]);
+  await client.query(
+    `UPDATE product_listings SET state = $2, last_error = $3
+      WHERE product_id = $1 AND state = 'PUBLISH_PENDING'`,
+    [productId, failed ? 'FAILED' : 'NOT_LISTED', failed ?? null]);
+});
+
+for (const type of ['post_update', 'post_publish']) {
+  registerApprovalType(type, {
+    label: 'post sync',
+    webhook: () => N8N_POST_SYNC_WEBHOOK_URL,
+    enrich: async (payload) => ({ post: await readPost(payload.post_id) }),
+    onDispatchFailed: (payload, why) => postRollback(payload.post_id, why),
+    onRejected: async (payload) => {
+      await postRollback(payload.post_id, null);
+      return { post_update: 'discarded' };
+    },
+  });
+}
+
+registerApprovalType('product_delist', {
+  label: 'product sync',
+  webhook: () => N8N_PRODUCT_SYNC_WEBHOOK_URL,
+  enrich: async (payload) => ({
+    product: await readProduct(payload.product_id),
+    // The sync workflow needs telling this is a removal, not an edit.
+    action: 'delist',
+  }),
+  onDispatchFailed: (payload, why) => productRollback(payload.product_id, why),
+  onRejected: async (payload) => {
+    await productRollback(payload.product_id, null);
+    return { delete: 'cancelled — the product stays' };
+  },
+});
+
+for (const type of ['product_publish', 'product_update']) {
+  registerApprovalType(type, {
+    label: 'product sync',
+    webhook: () => N8N_PRODUCT_SYNC_WEBHOOK_URL,
+    enrich: async (payload) => ({ product: await readProduct(payload.product_id) }),
+    onDispatchFailed: (payload, why) => productRollback(payload.product_id, why),
+    onRejected: async (payload) => {
+      await productRollback(payload.product_id, null);
+      return { product_update: 'discarded' };
+    },
+  });
+}
+
 // ---------------------------------------------------------- platform API
 // For whoever runs this deployment and sells it on. The hard rule here is
 // that a platform operator sees ACTIVITY, never CONTENT: no draft text, no
@@ -1460,11 +1772,6 @@ app.post('/api/products/:id/publish', wrap(async (req, res) => {
 // grant from that business, like it does for anybody else.
 
 app.use('/api/platform', requirePlatformOwner);
-
-const BUSINESS_TYPES = [
-  'electrical', 'it_services', 'retail', 'food', 'construction',
-  'logistics', 'professional_services', 'general',
-];
 
 app.get('/api/platform/overview', wrap(async (_req, res) => {
   const { rows: businesses } = await q(
@@ -1537,16 +1844,9 @@ app.post('/api/platform/businesses', wrap(async (req, res) => {
   if (!BUSINESS_TYPES.includes(businessType)) throw new HttpError(400, 'unknown business type');
   if (!/^[A-Z]{3}$/.test(currency)) throw new HttpError(400, 'currency must be a 3-letter code');
 
-  const business = await tx(async (client) => {
-    const { rows } = await client.query(
-      `INSERT INTO businesses (code, name, business_type, timezone, currency, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, code, name, business_type, timezone, currency, is_active, created_at`,
-      [code, name, businessType, timezone, currency, req.user.id],
-    );
-    await client.query('SELECT provision_business_agents($1)', [rows[0].id]);
-    return rows[0];
-  }).catch((err) => {
+  const business = await tx((client) => openFloor(client, {
+    code, name, businessType, timezone, currency, createdBy: req.user.id,
+  })).catch((err) => {
     if (err.code === '23505') throw new HttpError(409, `a business already uses the code ${code}`);
     throw err;
   });
@@ -1922,6 +2222,26 @@ app.post('/api/internal/products/:id/listings', wrap(async (req, res) => {
       actor: 'n8n',
       detail: { sku: product.sku, state, error: req.body?.error ?? null },
     });
+
+    // A delete that was waiting on the shops happens here, once none of them
+    // still carries it and none is still mid-flight. A shop that refused to
+    // take it down keeps the product alive on purpose: deleting it here would
+    // leave a listing out there with nothing behind it.
+    if (req.body?.delisting === true) {
+      const { rows } = await client.query(
+        `SELECT count(*) FILTER (WHERE state IN ('LISTED','PUBLISH_PENDING','UPDATE_PENDING'))::int AS blocking,
+                count(*) FILTER (WHERE state = 'FAILED')::int AS failed
+           FROM product_listings WHERE product_id = $1`, [productId]);
+      if (rows[0].blocking === 0 && rows[0].failed === 0) {
+        await client.query(`DELETE FROM products WHERE id = $1`, [productId]);
+        await logAction(client, {
+          businessId: product.business_id,
+          action: 'PRODUCT_DELETED',
+          actor: 'n8n',
+          detail: { sku: product.sku, name: product.name, after: 'delist' },
+        });
+      }
+    }
   });
 
   res.json({ ok: true, product: await readProduct(productId) });
@@ -2006,6 +2326,23 @@ app.post('/api/internal/agents/:id/release', wrap(async (req, res) => {
   res.json({ ok: true, agent, paused: agent === null });
 }));
 
+// ------------------------------------------- the selling floor's own routes
+// The inbox, the orders and the money live in commerce.js; the live streams
+// in live.js. Both are handed the same helpers this file uses, so there is
+// one tenant filter, one logger, one gate — not three copies of each.
+
+const moduleContext = {
+  q, tx, wrap, HttpError, assertUuid, businessClause, scopeFor, requireOwner,
+  assertInScope, logAction, settleAgent, deskFor, requireUser,
+  registerApprovalType, internalGate,
+  chatWebhookUrl: () => N8N_CHAT_WEBHOOK_URL || N8N_DISPATCH_WEBHOOK_URL,
+  orderSyncWebhookUrl: () => N8N_PRODUCT_SYNC_WEBHOOK_URL,
+  liveWebhookUrl: () => N8N_LIVE_WEBHOOK_URL || N8N_DISPATCH_WEBHOOK_URL,
+};
+
+registerCommerce(app, moduleContext);
+registerLive(app, moduleContext);
+
 // -------------------------------------------------------------- errors
 
 app.use((err, _req, res, _next) => {
@@ -2031,6 +2368,13 @@ const stopListening = listen('office_events', async (event) => {
     } else if (event.entity === 'action_log') {
       const log = await readLog(event.id);
       if (log) broadcast(event.business_id, 'log:append', log);
+    } else {
+      // Everything else — a post, a product, a conversation, an order, a
+      // payment, a live session — is a collection the dashboard refetches. We
+      // say which one changed and let it ask; the row it gets back is then the
+      // committed one, which is the whole point of going through the database.
+      broadcast(event.business_id, 'collection:changed',
+        { entity: event.entity, id: event.id, op: event.op });
     }
   } catch (err) {
     console.error('[realtime] could not fan out', event, err.message);

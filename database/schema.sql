@@ -209,17 +209,21 @@ RETURNS integer AS $fn$
 DECLARE
   inserted integer;
 BEGIN
+  -- Ten desks: the five that face outward along the front, the five that keep
+  -- the place running behind them. The coordinates are the floor the canvas
+  -- draws, so this table is the only place the layout is decided.
   WITH roster (department, role_title, sprite, desk_x, desk_y) AS (
     VALUES
-      ('Sales',      'Sales Agent',        'staff_amber',  160, 300),
-      ('Marketing',  'Marketing Agent',    'staff_rose',   480, 300),
-      ('CRM',        'Customer Care Agent','staff_sky',    800, 300),
-      ('Inventory',  'Inventory Agent',    'staff_lime',   160, 450),
-      ('HR',         'People Agent',       'staff_violet', 480, 450),
-      ('Admin',      'Admin Agent',        'staff_slate',  800, 450),
-      ('Logistics',  'Dispatch Agent',     'staff_teal',   160, 600),
-      ('Security',   'Security Agent',     'staff_red',    480, 600),
-      ('Production', 'Operations Agent',   'staff_orange', 800, 600)
+      ('Sales',      'Sales Agent',        'staff_amber',  124, 330),
+      ('Marketing',  'Marketing Agent',    'staff_rose',   336, 330),
+      ('CRM',        'Customer Care Agent','staff_sky',    548, 330),
+      ('Payments',   'Payment Collector',  'staff_emerald',760, 330),
+      ('Inventory',  'Inventory Agent',    'staff_lime',   972, 330),
+      ('Logistics',  'Dispatch Agent',     'staff_teal',   124, 560),
+      ('Production', 'Operations Agent',   'staff_orange', 336, 560),
+      ('Admin',      'Admin Agent',        'staff_slate',  548, 560),
+      ('HR',         'People Agent',       'staff_violet', 760, 560),
+      ('Security',   'Security Agent',     'staff_red',    972, 560)
   )
   INSERT INTO agents (business_id, department, name, role_title, avatar_sprite_key, desk_x, desk_y)
   SELECT p_business_id, r.department, r.department || ' Agent', r.role_title,
@@ -239,6 +243,11 @@ BEGIN
     JOIN skill_catalogue c ON c.department = a.department
    WHERE a.business_id = p_business_id
   ON CONFLICT (agent_id, skill_key) DO NOTHING;
+
+  -- The Payments desk needs a rule per marketplace before it can decide
+  -- anything, so a new floor gets the defaults with its desks. Defined
+  -- further down the file; plpgsql resolves the call when it runs.
+  PERFORM provision_payment_rules(p_business_id);
 
   RETURN inserted;
 END;
@@ -348,7 +357,18 @@ INSERT INTO skill_catalogue (department, skill_key, name, summary, sort) VALUES
   ('Production','job_scheduling','Job order scheduling','Sequences work orders against crew, materials and deadlines.',1),
   ('Production','qa_checklists','Quality checklists','Builds and checks the sign-off list for each job type.',2),
   ('Production','materials_estimate','Materials estimate','Works out what a job needs and what it will cost in PHP.',3),
-  ('Production','progress_reporting','Progress reporting','Reports where each job stands, with photos where it helps.',4)
+  ('Production','progress_reporting','Progress reporting','Reports where each job stands, with photos where it helps.',4),
+  -- Payments. The money side of a marketplace sale, which is not the same
+  -- thing as the order: the buyer pays the platform, the platform holds it,
+  -- and only later does any of it reach the seller.
+  ('Payments','payment_watch','Payment watching','Reads each order payment state from Shopee, Lazada and TikTok Shop and says which ones are really paid.',1),
+  ('Payments','cod_rules','COD rules','Applies the business''s cash-on-delivery limits: what may go out unpaid, up to how much, and what must be prepaid.',2),
+  ('Payments','unpaid_chasing','Unpaid order chasing','Drafts the polite nudge for an order that was placed and never paid, and the cancellation when the window closes.',3),
+  ('Payments','escrow_tracking','Escrow tracking','Follows the money from paid, through the platform''s hold, to the day it is released.',4),
+  ('Payments','payout_reconciliation','Payout reconciliation','Matches a platform payout against the orders in it and flags a shortfall with the figures.',5),
+  ('Payments','fee_breakdown','Fee breakdown','Pulls apart commission, transaction and shipping fees so the margin is the real one.',6),
+  ('Payments','refund_handling','Refund handling','Reads a refund or return and works out what it does to stock and to the payout.',7),
+  ('Payments','live_checkout','Live checkout links','Issues the checkout link for a live-stream claim and watches whether it gets paid before the hold runs out.',8)
 ON CONFLICT (department, skill_key) DO UPDATE
   SET name = EXCLUDED.name, summary = EXCLUDED.summary, sort = EXCLUDED.sort;
 
@@ -497,3 +517,471 @@ CREATE TRIGGER products_notify
 -- business may hold more than one per platform.
 ALTER TABLE social_post_targets ADD COLUMN IF NOT EXISTS account_id uuid
   REFERENCES platform_accounts(id) ON DELETE SET NULL;
+
+-- ------------------------------------------------- marketplace messages
+-- Shopee, Lazada and TikTok give a seller a chat thread with a buyer and an
+-- order feed. Neither gives a seller a phone line: there is no voice-call
+-- API on any of the three, so the CRM desk answers in writing and nowhere
+-- in this app offers to place a call. Messenger and Instagram DMs land in
+-- the same two tables so one inbox covers every channel.
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id   uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  account_id    uuid REFERENCES platform_accounts(id) ON DELETE SET NULL,
+  -- Where the buyer is writing from. Each one is text chat; see the note above.
+  channel       text NOT NULL
+                CHECK (channel IN ('shopee_chat','lazada_chat','tiktok_dm',
+                                   'meta_dm','instagram_dm','email')),
+  -- The thread id the marketplace itself uses, so a reply goes back to the
+  -- same conversation rather than opening a new one.
+  external_id   text,
+  buyer_name    text NOT NULL DEFAULT 'Buyer',
+  buyer_handle  text,
+  -- Set when the buyer is asking about something in the catalogue.
+  product_id    uuid REFERENCES products(id) ON DELETE SET NULL,
+  order_id      uuid,
+  status        text NOT NULL DEFAULT 'OPEN'
+                CHECK (status IN ('OPEN','AWAITING_APPROVAL','ANSWERED','CLOSED')),
+  last_message_at timestamptz NOT NULL DEFAULT now(),
+  unread        int NOT NULL DEFAULT 0 CHECK (unread >= 0),
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  business_id     uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  direction       text NOT NULL CHECK (direction IN ('IN','OUT')),
+  body            text NOT NULL,
+  -- An outbound line is only ever written here once a human approved it, so
+  -- it carries the approval that let it out.
+  approval_id     uuid REFERENCES approvals(id) ON DELETE SET NULL,
+  external_id     text,
+  sent_at         timestamptz,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS conversations_business_idx
+  ON conversations (business_id, last_message_at DESC);
+CREATE INDEX IF NOT EXISTS conversations_channel_idx ON conversations (business_id, channel);
+CREATE UNIQUE INDEX IF NOT EXISTS conversations_external_idx
+  ON conversations (account_id, channel, external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS messages_thread_idx ON messages (conversation_id, created_at);
+
+DROP TRIGGER IF EXISTS conversations_touch ON conversations;
+CREATE TRIGGER conversations_touch
+  BEFORE UPDATE ON conversations
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS conversations_notify ON conversations;
+CREATE TRIGGER conversations_notify
+  AFTER INSERT OR UPDATE OR DELETE ON conversations
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('conversation');
+
+DROP TRIGGER IF EXISTS messages_notify ON messages;
+CREATE TRIGGER messages_notify
+  AFTER INSERT OR UPDATE ON messages
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('message');
+
+-- --------------------------------------------------------------- orders
+-- Sales, pulled from each shop. The app does not take the money — the
+-- marketplace does — so an order row is a record of something that already
+-- happened and is never the gate's business. Fulfilment is: it moves stock
+-- and it can be cancelled, so those writes are owner-only and logged.
+
+CREATE TABLE IF NOT EXISTS orders (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id  uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  account_id   uuid REFERENCES platform_accounts(id) ON DELETE SET NULL,
+  -- 'live' marks an order that came out of a live selling session rather
+  -- than the ordinary shopfront.
+  source       text NOT NULL DEFAULT 'shop'
+               CHECK (source IN ('shop','live','chat')),
+  external_id  text NOT NULL,
+  order_no     text,
+  buyer_name   text NOT NULL DEFAULT 'Buyer',
+  status       text NOT NULL DEFAULT 'UNPAID'
+               CHECK (status IN ('UNPAID','PAID','READY_TO_SHIP','SHIPPED',
+                                 'DELIVERED','CANCELLED','RETURNED')),
+  total        numeric(12,2) NOT NULL DEFAULT 0 CHECK (total >= 0),
+  currency     char(3) NOT NULL DEFAULT 'PHP',
+  -- Where the buyer finishes paying. On Shopee, Lazada and TikTok Shop the
+  -- checkout belongs to the marketplace; this is the link we hand over.
+  checkout_url text,
+  placed_at    timestamptz NOT NULL DEFAULT now(),
+  -- When the stock for this order actually left the shelf. Which event does
+  -- that is a payment rule, not a fixed law, so it is recorded rather than
+  -- inferred — and it makes taking stock idempotent when a sync runs twice.
+  stock_taken_at timestamptz,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  product_id  uuid REFERENCES products(id) ON DELETE SET NULL,
+  sku         text NOT NULL,
+  name        text NOT NULL,
+  qty         int NOT NULL DEFAULT 1 CHECK (qty > 0),
+  unit_price  numeric(12,2) NOT NULL DEFAULT 0 CHECK (unit_price >= 0)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS orders_external_idx
+  ON orders (account_id, external_id);
+CREATE INDEX IF NOT EXISTS orders_business_idx ON orders (business_id, placed_at DESC);
+CREATE INDEX IF NOT EXISTS orders_status_idx ON orders (business_id, status);
+CREATE INDEX IF NOT EXISTS order_items_order_idx ON order_items (order_id);
+
+-- `conversations.order_id` points at a table declared below it, so the key
+-- is added here rather than inline. Guarded, because this file re-runs.
+DO $do$
+BEGIN
+  ALTER TABLE conversations
+    ADD CONSTRAINT conversations_order_fk FOREIGN KEY (order_id)
+    REFERENCES orders(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$do$;
+
+DROP TRIGGER IF EXISTS orders_touch ON orders;
+CREATE TRIGGER orders_touch
+  BEFORE UPDATE ON orders
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS orders_notify ON orders;
+CREATE TRIGGER orders_notify
+  AFTER INSERT OR UPDATE OR DELETE ON orders
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('order');
+
+-- ---------------------------------------------------------- live selling
+-- A live session and the basket of items pinned to it — the yellow basket
+-- a TikTok Live viewer taps to buy without leaving the stream.
+--
+-- TikTok: real. TikTok Shop's API lets a seller attach catalogue products
+-- to a LIVE room, so `live_basket_items.external_id` is the showcase id it
+-- hands back and `slot` is the number the host calls out ("item 3").
+--
+-- Facebook: Meta retired Live Shopping — product tagging in a Facebook Live
+-- ended 1 October 2022, and Instagram's went in March 2023. There is no
+-- basket to pin to any more. What still works, and what sellers here
+-- actually do, is read the comments: a viewer types "mine" or "3 mine", the
+-- CRM desk reserves the stock and sends a checkout link in Messenger. So a
+-- facebook session keeps the same basket rows for the host to read from,
+-- and `basket_supported` is false to say on screen that the taps are gone.
+
+CREATE TABLE IF NOT EXISTS live_sessions (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id    uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  account_id     uuid REFERENCES platform_accounts(id) ON DELETE SET NULL,
+  platform       text NOT NULL CHECK (platform IN ('tiktok','facebook')),
+  title          text NOT NULL,
+  -- The room id on the platform, once the stream is up.
+  external_id    text,
+  status         text NOT NULL DEFAULT 'SCHEDULED'
+                 CHECK (status IN ('SCHEDULED','ARMED','LIVE','PAUSED','ENDED')),
+  -- A live session is approved once, as a whole, and that approval is what
+  -- lets the desk answer comments inside it without stopping for each one.
+  armed_approval_id uuid REFERENCES approvals(id) ON DELETE SET NULL,
+  -- What the desk is allowed to say back while the stream runs.
+  reply_template text NOT NULL DEFAULT
+    'Reserved for you, {buyer}. Checkout link: {checkout_url} — it holds for 15 minutes.',
+  -- How long a reservation holds before the stock goes back.
+  hold_minutes   int NOT NULL DEFAULT 15 CHECK (hold_minutes BETWEEN 1 AND 180),
+  scheduled_for  timestamptz,
+  started_at     timestamptz,
+  ended_at       timestamptz,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS live_basket_items (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id  uuid NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  product_id  uuid NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  -- The number the host calls out. Unique within a session.
+  slot        int NOT NULL CHECK (slot BETWEEN 1 AND 99),
+  -- The live price, which is usually not the shelf price.
+  live_price  numeric(12,2) CHECK (live_price IS NULL OR live_price >= 0),
+  -- How many of them this session may sell before it stops taking "mine".
+  allocation  int NOT NULL DEFAULT 0 CHECK (allocation >= 0),
+  reserved    int NOT NULL DEFAULT 0 CHECK (reserved >= 0),
+  sold        int NOT NULL DEFAULT 0 CHECK (sold >= 0),
+  state       text NOT NULL DEFAULT 'PIN_PENDING'
+              CHECK (state IN ('PIN_PENDING','PINNED','UNPIN_PENDING','REMOVED','FAILED')),
+  external_id text,
+  last_error  text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (session_id, slot),
+  UNIQUE (session_id, product_id)
+);
+
+-- One row per sample the monitor takes, so the chart on the dashboard is
+-- read out of the database like everything else rather than kept in a
+-- browser tab that someone might close.
+CREATE TABLE IF NOT EXISTS live_metrics (
+  id          bigserial PRIMARY KEY,
+  session_id  uuid NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  sampled_at  timestamptz NOT NULL DEFAULT now(),
+  viewers     int NOT NULL DEFAULT 0 CHECK (viewers >= 0),
+  likes       int NOT NULL DEFAULT 0 CHECK (likes >= 0),
+  comments    int NOT NULL DEFAULT 0 CHECK (comments >= 0),
+  -- Taps on the basket, which only TikTok reports.
+  basket_opens int NOT NULL DEFAULT 0 CHECK (basket_opens >= 0),
+  orders      int NOT NULL DEFAULT 0 CHECK (orders >= 0),
+  revenue     numeric(12,2) NOT NULL DEFAULT 0 CHECK (revenue >= 0)
+);
+
+-- A viewer saying "mine". Stock is held here, not in the marketplace, until
+-- they either pay or the hold runs out.
+CREATE TABLE IF NOT EXISTS live_claims (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id    uuid NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+  business_id   uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  basket_item_id uuid NOT NULL REFERENCES live_basket_items(id) ON DELETE CASCADE,
+  buyer_name    text NOT NULL DEFAULT 'Viewer',
+  buyer_handle  text,
+  qty           int NOT NULL DEFAULT 1 CHECK (qty > 0),
+  -- The comment that was read as buy intent, kept so a dispute can be read
+  -- back rather than argued about.
+  comment_text  text,
+  status        text NOT NULL DEFAULT 'HELD'
+                CHECK (status IN ('HELD','CHECKOUT_SENT','PAID','EXPIRED','CANCELLED')),
+  checkout_url  text,
+  order_id      uuid REFERENCES orders(id) ON DELETE SET NULL,
+  conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL,
+  holds_until   timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS live_sessions_business_idx
+  ON live_sessions (business_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS live_basket_session_idx ON live_basket_items (session_id, slot);
+CREATE INDEX IF NOT EXISTS live_metrics_session_idx
+  ON live_metrics (session_id, sampled_at DESC);
+CREATE INDEX IF NOT EXISTS live_claims_session_idx
+  ON live_claims (session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS live_claims_open_idx
+  ON live_claims (business_id, status) WHERE status IN ('HELD','CHECKOUT_SENT');
+
+DROP TRIGGER IF EXISTS live_sessions_touch ON live_sessions;
+CREATE TRIGGER live_sessions_touch
+  BEFORE UPDATE ON live_sessions
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS live_claims_touch ON live_claims;
+CREATE TRIGGER live_claims_touch
+  BEFORE UPDATE ON live_claims
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS live_sessions_notify ON live_sessions;
+CREATE TRIGGER live_sessions_notify
+  AFTER INSERT OR UPDATE OR DELETE ON live_sessions
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('live_session');
+
+DROP TRIGGER IF EXISTS live_basket_notify ON live_basket_items;
+CREATE TRIGGER live_basket_notify
+  AFTER INSERT OR UPDATE OR DELETE ON live_basket_items
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('live_session');
+
+DROP TRIGGER IF EXISTS live_claims_notify ON live_claims;
+CREATE TRIGGER live_claims_notify
+  AFTER INSERT OR UPDATE OR DELETE ON live_claims
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('live_claim');
+
+DROP TRIGGER IF EXISTS live_metrics_notify ON live_metrics;
+CREATE TRIGGER live_metrics_notify
+  AFTER INSERT ON live_metrics
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('live_metric');
+
+-- ------------------------------------------------------------- the money
+-- A marketplace sale and the money for it are two different events, days
+-- apart, and this app does not take the money at any point. What happens on
+-- Shopee, Lazada and TikTok Shop is the same shape on all three:
+--
+--   1. the buyer pays the platform, or says they will pay the courier (COD);
+--   2. the platform holds it — escrow — while the parcel travels;
+--   3. after delivery and the buyer-protection window, the platform releases
+--      the seller's share into a payout, minus its commission and fees.
+--
+-- So `payments` is the per-order record of where the money has got to, and
+-- `payouts` is the settlement batch the platform actually transfers. The
+-- Payments desk reconciles one against the other and shouts when they do not
+-- agree. Nothing here moves money; it reads what the platform did.
+
+CREATE TABLE IF NOT EXISTS payments (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  order_id    uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  account_id  uuid REFERENCES platform_accounts(id) ON DELETE SET NULL,
+  -- How the buyer is paying. 'cod' is the one that is not money yet.
+  method      text NOT NULL DEFAULT 'unknown'
+              CHECK (method IN ('unknown','online','cod','wallet',
+                                'bank_transfer','installment','live_link')),
+  -- AWAITING: placed, nothing paid.  IN_ESCROW: paid, platform holding it.
+  -- RELEASED: in a payout.  SHORT: the payout came in under what the order
+  -- says, which is a thing that happens and must not be rounded away.
+  state       text NOT NULL DEFAULT 'AWAITING'
+              CHECK (state IN ('AWAITING','IN_ESCROW','RELEASED','SHORT',
+                               'REFUNDED','CANCELLED','EXPIRED','FAILED')),
+  -- What the buyer paid, what the platform kept, what is left.
+  gross       numeric(12,2) NOT NULL DEFAULT 0 CHECK (gross >= 0),
+  commission_fee numeric(12,2) NOT NULL DEFAULT 0,
+  transaction_fee numeric(12,2) NOT NULL DEFAULT 0,
+  shipping_fee numeric(12,2) NOT NULL DEFAULT 0,
+  other_fee   numeric(12,2) NOT NULL DEFAULT 0,
+  -- What the platform says the seller gets. Kept as reported, not computed,
+  -- so a disagreement with gross minus fees is visible instead of hidden.
+  net         numeric(12,2) NOT NULL DEFAULT 0,
+  currency    char(3) NOT NULL DEFAULT 'PHP',
+  external_id text,
+  paid_at     timestamptz,
+  escrow_release_at timestamptz,
+  released_at timestamptz,
+  last_error  text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (order_id)
+);
+
+CREATE TABLE IF NOT EXISTS payouts (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  account_id  uuid NOT NULL REFERENCES platform_accounts(id) ON DELETE CASCADE,
+  external_id text NOT NULL,
+  period_start date,
+  period_end   date,
+  gross       numeric(12,2) NOT NULL DEFAULT 0,
+  fees        numeric(12,2) NOT NULL DEFAULT 0,
+  adjustments numeric(12,2) NOT NULL DEFAULT 0,
+  net         numeric(12,2) NOT NULL DEFAULT 0,
+  currency    char(3) NOT NULL DEFAULT 'PHP',
+  -- EXPECTED: the platform has announced it.  SETTLED: it landed and matches.
+  -- SHORT: it landed under what its orders add up to.  DISPUTED: raised.
+  state       text NOT NULL DEFAULT 'EXPECTED'
+              CHECK (state IN ('EXPECTED','SETTLED','SHORT','DISPUTED')),
+  -- What reconciliation found, in words, for whoever reads it next.
+  variance    numeric(12,2) NOT NULL DEFAULT 0,
+  note        text,
+  settled_at  timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (account_id, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS payout_orders (
+  payout_id uuid NOT NULL REFERENCES payouts(id) ON DELETE CASCADE,
+  order_id  uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  amount    numeric(12,2) NOT NULL DEFAULT 0,
+  PRIMARY KEY (payout_id, order_id)
+);
+
+-- The rules the Payments desk applies, per business and per platform,
+-- because Shopee, Lazada and TikTok do not behave the same and a seller's
+-- appetite for COD is their own business decision, not ours.
+CREATE TABLE IF NOT EXISTS payment_rules (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  platform    text NOT NULL CHECK (platform IN ('shopee','lazada','tiktok','live')),
+  -- Cash on delivery: allowed at all, and up to what order total.
+  allow_cod   boolean NOT NULL DEFAULT true,
+  cod_limit   numeric(12,2) NOT NULL DEFAULT 5000 CHECK (cod_limit >= 0),
+  -- When the stock is really gone. 'order' is optimistic and oversells;
+  -- 'payment' is the usual choice; 'release' is for the badly burned.
+  release_stock_on text NOT NULL DEFAULT 'payment'
+                   CHECK (release_stock_on IN ('order','payment','release')),
+  -- An order placed and not paid: nudge after this long, cancel after that.
+  chase_unpaid_after_minutes int NOT NULL DEFAULT 180
+                   CHECK (chase_unpaid_after_minutes > 0),
+  cancel_unpaid_after_minutes int NOT NULL DEFAULT 2880
+                   CHECK (cancel_unpaid_after_minutes > 0),
+  -- How far a payout may miss its orders before it is called SHORT. Rounding
+  -- happens; a missing item does not.
+  reconcile_tolerance numeric(12,2) NOT NULL DEFAULT 1.00
+                   CHECK (reconcile_tolerance >= 0),
+  -- Chasing a buyer is a message to a customer, so it goes through the gate
+  -- like everything else. Turning this off stops the drafts being filed at
+  -- all; it does not make them send themselves.
+  chase_needs_approval boolean NOT NULL DEFAULT true,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (business_id, platform),
+  CHECK (cancel_unpaid_after_minutes >= chase_unpaid_after_minutes)
+);
+
+-- Every business gets the default set, so the desk always has a rule to
+-- apply rather than a null to guess at.
+CREATE OR REPLACE FUNCTION provision_payment_rules(p_business_id uuid)
+RETURNS integer AS $fn$
+DECLARE
+  inserted integer;
+BEGIN
+  INSERT INTO payment_rules (business_id, platform, cod_limit, release_stock_on)
+  SELECT p_business_id, v.platform, v.cod_limit, v.release_stock_on
+    FROM (VALUES
+      -- Shopee PH: COD is the default for most buyers, so it is on, capped.
+      ('shopee', 5000::numeric, 'payment'),
+      -- Lazada PH: same, and its payout cycle is the slowest of the three.
+      ('lazada', 5000::numeric, 'payment'),
+      -- TikTok Shop: mostly prepaid, so a COD order is the exception.
+      ('tiktok', 3000::numeric, 'payment'),
+      -- A live claim is a checkout link with a timer. Nothing leaves the
+      -- shelf until it is paid, or the next viewer loses the item.
+      ('live',   0::numeric,    'payment')
+    ) AS v (platform, cod_limit, release_stock_on)
+  ON CONFLICT (business_id, platform) DO NOTHING;
+  GET DIAGNOSTICS inserted = ROW_COUNT;
+  RETURN inserted;
+END;
+$fn$ LANGUAGE plpgsql;
+
+-- A live claim is never COD: a link that is not paid simply expires.
+UPDATE payment_rules SET allow_cod = false WHERE platform = 'live' AND allow_cod;
+
+CREATE INDEX IF NOT EXISTS payments_business_idx ON payments (business_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS payments_state_idx ON payments (business_id, state);
+CREATE INDEX IF NOT EXISTS payouts_business_idx ON payouts (business_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS payout_orders_order_idx ON payout_orders (order_id);
+
+DROP TRIGGER IF EXISTS payments_touch ON payments;
+CREATE TRIGGER payments_touch
+  BEFORE UPDATE ON payments
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS payouts_touch ON payouts;
+CREATE TRIGGER payouts_touch
+  BEFORE UPDATE ON payouts
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS payment_rules_touch ON payment_rules;
+CREATE TRIGGER payment_rules_touch
+  BEFORE UPDATE ON payment_rules
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS payments_notify ON payments;
+CREATE TRIGGER payments_notify
+  AFTER INSERT OR UPDATE OR DELETE ON payments
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('payment');
+
+DROP TRIGGER IF EXISTS payouts_notify ON payouts;
+CREATE TRIGGER payouts_notify
+  AFTER INSERT OR UPDATE OR DELETE ON payouts
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('payout');
+
+DROP TRIGGER IF EXISTS payment_rules_notify ON payment_rules;
+CREATE TRIGGER payment_rules_notify
+  AFTER INSERT OR UPDATE ON payment_rules
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('payment_rule');
+
+-- Floors that existed before the Payments desk did: give them its rules and
+-- its skills. `provision_business_agents` is idempotent and never touches a
+-- live `status`, so this is safe on a running deployment.
+SELECT provision_business_agents(id) FROM businesses;
+
+-- Orders that existed before stock-taking was recorded.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_taken_at timestamptz;

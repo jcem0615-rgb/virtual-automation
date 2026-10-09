@@ -1,5 +1,5 @@
 -- Virtual Office — seed data.
--- Two demo businesses, nine agents each (one per department).
+-- Two demo businesses, ten agents each (one per department).
 -- Idempotent: re-running refreshes names and desk positions but never touches
 -- a live `status`, so you can reseed a running office safely.
 
@@ -28,6 +28,7 @@ WITH roster (business_code, department, name) AS (
     ('BIZ_ELEC', 'Logistics',  'Kiko Arellano'),
     ('BIZ_ELEC', 'Security',   'Pia Tolentino'),
     ('BIZ_ELEC', 'Production', 'Ramon Guzman'),
+    ('BIZ_ELEC', 'Payments',   'Celine Abad'),
     ('BIZ_ITSOL', 'Sales',      'Jonas Salcedo'),
     ('BIZ_ITSOL', 'Marketing',  'Trina Lazaro'),
     ('BIZ_ITSOL', 'CRM',        'Bea Sandoval'),
@@ -36,7 +37,8 @@ WITH roster (business_code, department, name) AS (
     ('BIZ_ITSOL', 'Admin',      'Teddy Ocampo'),
     ('BIZ_ITSOL', 'Logistics',  'Val Dizon'),
     ('BIZ_ITSOL', 'Security',   'Gail Fortich'),
-    ('BIZ_ITSOL', 'Production', 'Ivan Mercado')
+    ('BIZ_ITSOL', 'Production', 'Ivan Mercado'),
+    ('BIZ_ITSOL', 'Payments',   'Nico Fajardo')
 )
 UPDATE agents a
    SET name = r.name
@@ -53,7 +55,8 @@ UPDATE agents a SET role_title = v.role_title
     ('Inventory', 'Asset Agent'),
     ('Logistics', 'Deployment Agent'),
     ('Security', 'SecOps Agent'),
-    ('Production', 'Service Desk Agent')
+    ('Production', 'Service Desk Agent'),
+    ('Payments', 'Billing Agent')
   ) AS v (department, role_title)
  WHERE a.department = v.department
    AND a.business_id = (SELECT id FROM businesses WHERE code = 'BIZ_ITSOL');
