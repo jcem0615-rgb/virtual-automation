@@ -28,7 +28,12 @@ docker compose exec backend node scripts/create-user.js \
 ```
 
 That account opens the **Control Room** instead of a floor. See *Running this as a
-platform* below.
+platform* below. **There is only ever one of these** — the database enforces it. To hand
+it to someone else:
+
+```bash
+docker compose exec backend node scripts/transfer-owner.js --to them@example.com
+```
 
 That prints a generated password once. Pass `--password` to choose your own (10
 characters minimum), omit `--business` to grant every business, and repeat
@@ -124,6 +129,47 @@ It is not an offline app. The service worker caches the shell and the build asse
 starts fast, but it deliberately never caches `/api` or the socket — a stale approval
 queue would be worse than no app at all. Open it without a connection and you get the
 dashboard chrome and a failed sign-in check.
+
+## What each agent is good at
+
+Every desk comes with its department's skills switched on — the Marketing agent has a
+**social media ads manager**, a content calendar, copywriting, promo planning and
+performance reporting; Sales has lead qualification, quoting, follow-ups, booking and
+upsells; CRM has DM replies, review responses, history recall, escalation triage and
+satisfaction follow-ups; and so on through Inventory, HR, Admin, Logistics, Security and
+Production.
+
+Click an agent to see the list. An **owner** can switch any of them off, and that
+changes what the model is asked to do: `/api/internal/agents/checkout` hands n8n the
+enabled skills, and the workflow builds its prompt from them. Reviewers see the list but
+cannot change it.
+
+Skills are reference data in `skill_catalogue`, keyed by department, so adding one is an
+INSERT rather than a code change.
+
+## Social posts, kept in sync
+
+The app is where a post is written and edited; the platforms hold copies. Each post
+shows the platforms it is on and the state of each copy.
+
+- **Syncing in** — n8n posts to `/api/internal/posts` with the platform and that
+  platform's own id. Re-syncing the same post updates the copy here instead of
+  duplicating it.
+- **Editing** — edit the text in the app and choose which platforms it should go to.
+  If the post is already live anywhere, **saving does not publish**: it files an approval
+  like any other outbound work, and those platform copies show as *updating*.
+- **Approving** sends it. `workflow_post_sync.json` updates each platform in place and
+  reports back per platform, so the dashboard shows exactly which copies went out and
+  which did not, with the reason.
+- **Rejecting** discards the edit; the live copies are never touched.
+
+The list has a **filter per platform**, so you can work on one channel at a time instead
+of scrolling a mixed feed.
+
+Two honest limits: editing a Facebook page post works through the Graph API, but
+**Instagram does not allow editing a published caption** — the workflow reports that copy
+as failed with the reason rather than pretending it worked. Shopee, Lazada, TikTok and X
+are routed but their senders are placeholders.
 
 ## Connecting a Facebook or Instagram page
 
@@ -267,10 +313,11 @@ the realtime path runs on triggers, so mocks prove nothing.
 | `backend/server.js` | Express + Socket.io. REST for the UI and n8n, realtime fan-out. |
 | `backend/db.js` | pg pool, `tx()` helper, reconnecting LISTEN client. |
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
-| `backend/scripts/` | `create-user.js`, `reset-password.js`. |
+| `backend/scripts/` | `create-user.js`, `reset-password.js`, `transfer-owner.js`. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | The platform operator's portal. |
+| `frontend/src/components/PostsPanel.jsx` | Social posts and the per-platform filter. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene: the floor, and the staff who walk it. |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
 | `workflows/*.json` | n8n exports (sales lead, Messenger inbound, dispatch). |

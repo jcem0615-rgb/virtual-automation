@@ -26,6 +26,7 @@ const PORT = Number(process.env.PORT ?? 4000);
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN ?? 'dev-internal-token';
 const N8N_RETRY_WEBHOOK_URL = process.env.N8N_RETRY_WEBHOOK_URL ?? '';
 const N8N_DISPATCH_WEBHOOK_URL = process.env.N8N_DISPATCH_WEBHOOK_URL ?? '';
+const N8N_POST_SYNC_WEBHOOK_URL = process.env.N8N_POST_SYNC_WEBHOOK_URL ?? '';
 
 const app = express();
 
@@ -108,7 +109,18 @@ const APPROVAL_COLUMNS = `
 async function readAgents(scope) {
   const where = businessClause(scope);
   const { rows } = await q(
-    `SELECT ${AGENT_COLUMNS} FROM agents
+    `SELECT ${AGENT_COLUMNS},
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                       'key', c.skill_key, 'name', c.name,
+                       'summary', c.summary, 'enabled', s.enabled)
+                     ORDER BY c.sort)
+                FROM agent_skills s
+                JOIN skill_catalogue c
+                  ON c.skill_key = s.skill_key AND c.department = agents.department
+               WHERE s.agent_id = agents.id
+            ), '[]') AS skills
+       FROM agents
       WHERE ${where.sql}
       ORDER BY business_id, desk_y, desk_x`,
     where.params,
@@ -116,10 +128,36 @@ async function readAgents(scope) {
   return rows;
 }
 
+/** What this desk is currently asked to do. n8n builds its prompt from this. */
+async function readEnabledSkills(agentId) {
+  const { rows } = await q(
+    `SELECT c.skill_key AS key, c.name, c.summary
+       FROM agent_skills s
+       JOIN agents a ON a.id = s.agent_id
+       JOIN skill_catalogue c
+         ON c.skill_key = s.skill_key AND c.department = a.department
+      WHERE s.agent_id = $1 AND s.enabled
+      ORDER BY c.sort`,
+    [agentId],
+  );
+  return rows;
+}
+
 async function readAgent(id) {
   assertUuid(id, 'agent_id');
   const { rows } = await q(
-    `SELECT ${AGENT_COLUMNS} FROM agents WHERE id = $1`, [id]);
+    `SELECT ${AGENT_COLUMNS},
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                       'key', c.skill_key, 'name', c.name,
+                       'summary', c.summary, 'enabled', s.enabled)
+                     ORDER BY c.sort)
+                FROM agent_skills s
+                JOIN skill_catalogue c
+                  ON c.skill_key = s.skill_key AND c.department = agents.department
+               WHERE s.agent_id = agents.id
+            ), '[]') AS skills
+       FROM agents WHERE id = $1`, [id]);
   return rows[0] ?? null;
 }
 
@@ -380,13 +418,31 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
       { status: current.status });
   }
 
-  // Dispatch happens only after the row is committed as APPROVED.
-  const dispatch = await callWebhook(N8N_DISPATCH_WEBHOOK_URL, {
-    approval_id: outcome.id,
-    business_id: outcome.business_id,
-    agent_id: outcome.agent_id,
-    payload: outcome.payload_json,
-  }, 'dispatch');
+  // Dispatch happens only after the row is committed as APPROVED. A post edit
+  // goes to its own workflow, which updates each platform copy in place.
+  const payload = outcome.payload_json ?? {};
+  const isPostUpdate = payload.type === 'post_update';
+  const dispatch = await callWebhook(
+    isPostUpdate ? N8N_POST_SYNC_WEBHOOK_URL : N8N_DISPATCH_WEBHOOK_URL,
+    {
+      approval_id: outcome.id,
+      business_id: outcome.business_id,
+      agent_id: outcome.agent_id,
+      payload,
+      ...(isPostUpdate ? { post: await readPost(payload.post_id) } : {}),
+    },
+    isPostUpdate ? 'post sync' : 'dispatch',
+  );
+
+  // If nothing took the job, the platforms are not going to change, so do not
+  // leave the post looking like an update is on its way.
+  if (isPostUpdate && !dispatch.ok) {
+    await q(
+      `UPDATE social_post_targets SET state = 'FAILED', last_error = $2
+        WHERE post_id = $1 AND state = 'UPDATE_PENDING'`,
+      [payload.post_id, 'update could not be queued'],
+    ).catch(() => {});
+  }
 
   res.json({ ok: true, approval_id: outcome.id, dispatch });
 }));
@@ -437,6 +493,21 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
     assertInScope(user, current.business_id);
     throw new HttpError(409, `approval already ${current.status.toLowerCase()}`,
       { status: current.status });
+  }
+
+  // A rejected post edit is simply dropped: the platforms were never touched,
+  // so the live copies stay as they are.
+  if (outcome.payload_json?.type === 'post_update') {
+    const postId = outcome.payload_json.post_id;
+    await tx(async (client) => {
+      await client.query(
+        `UPDATE social_post_targets SET state = 'PUBLISHED'
+          WHERE post_id = $1 AND state = 'UPDATE_PENDING'`, [postId]);
+      await client.query(
+        `UPDATE social_posts SET status = 'PUBLISHED' WHERE id = $1`, [postId]);
+    }).catch((err) => console.error('[posts] could not roll back edit:', err.message));
+    res.json({ ok: true, approval_id: outcome.id, post_update: 'discarded' });
+    return;
   }
 
   // A paused agent gets no retry — PAUSED wins over the replay too.
@@ -509,6 +580,222 @@ app.post('/api/agents/:id/kill', wrap(async (req, res) => {
   res.json({ ok: true, agent });
 }));
 
+
+/** Switch one of a desk's skills on or off. Owners only. */
+app.patch('/api/agents/:id/skills/:key', wrap(async (req, res) => {
+  const agentId = assertUuid(req.params.id, 'agent_id');
+  const skillKey = String(req.params.key);
+  if (typeof req.body?.enabled !== 'boolean') {
+    throw new HttpError(400, 'enabled must be true or false');
+  }
+  const agent = await readAgent(agentId);
+  if (!agent) throw new HttpError(404, 'agent not found');
+  requireOwner(req.user, agent.business_id);
+
+  const updated = await tx(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE agent_skills SET enabled = $3, updated_at = now()
+        WHERE agent_id = $1 AND skill_key = $2
+        RETURNING skill_key, enabled`,
+      [agentId, skillKey, req.body.enabled],
+    );
+    if (!rows[0]) return null;
+    await logAction(client, {
+      businessId: agent.business_id,
+      agentId,
+      action: req.body.enabled ? 'SKILL_ENABLED' : 'SKILL_DISABLED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { skill: skillKey },
+    });
+    return rows[0];
+  });
+
+  if (!updated) throw new HttpError(404, 'this agent does not have that skill');
+  res.json({ ok: true, skill: updated, agent: await readAgent(agentId) });
+}));
+
+// ------------------------------------------------------------ social posts
+// Posts live here and are copied out to the platforms. Editing one never goes
+// straight out: it files an approval like any other outbound work, and only
+// the dispatch workflow pushes the change once a human has said yes.
+
+const PLATFORMS = ['facebook', 'instagram', 'tiktok', 'shopee', 'lazada', 'x'];
+
+const POST_COLUMNS = `
+  p.id, p.business_id, p.agent_id, p.title, p.body, p.media_url,
+  p.status, p.created_at, p.updated_at,
+  COALESCE((
+    SELECT json_agg(json_build_object(
+             'platform', t.platform, 'external_id', t.external_id,
+             'state', t.state, 'last_synced_at', t.last_synced_at,
+             'last_error', t.last_error) ORDER BY t.platform)
+      FROM social_post_targets t WHERE t.post_id = p.id
+  ), '[]') AS targets`;
+
+async function readPosts(scope, { platform, limit = 100 } = {}) {
+  const where = businessClause(scope, { column: 'p.business_id' });
+  const params = [...where.params];
+  let platformSql = '';
+  if (platform && platform !== 'all') {
+    if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
+    params.push(platform);
+    // Filtering by platform means "posts that go to this platform", so the
+    // list never mixes channels together.
+    platformSql = ` AND EXISTS (SELECT 1 FROM social_post_targets t2
+                                 WHERE t2.post_id = p.id AND t2.platform = $${params.length})`;
+  }
+  params.push(Math.min(Number(limit) || 100, 200));
+  const { rows } = await q(
+    `SELECT ${POST_COLUMNS} FROM social_posts p
+      WHERE ${where.sql}${platformSql}
+      ORDER BY p.updated_at DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+  return rows;
+}
+
+async function readPost(id) {
+  assertUuid(id, 'post_id');
+  const { rows } = await q(
+    `SELECT ${POST_COLUMNS} FROM social_posts p WHERE p.id = $1`, [id]);
+  return rows[0] ?? null;
+}
+
+app.use('/api/posts', requireUser);
+
+app.get('/api/posts', wrap(async (req, res) => {
+  res.json({
+    platforms: PLATFORMS,
+    posts: await readPosts(scopeFor(req.user, req.query.business_id), {
+      platform: req.query.platform,
+      limit: req.query.limit,
+    }),
+  });
+}));
+
+app.get('/api/posts/:id', wrap(async (req, res) => {
+  const post = await readPost(req.params.id);
+  if (!post) throw new HttpError(404, 'post not found');
+  assertInScope(req.user, post.business_id);
+  res.json(post);
+}));
+
+/**
+ * Edit a post. This does not touch any platform — it files an approval
+ * carrying the new text and the platforms it would go to. Approving it is what
+ * sends the update out.
+ */
+app.patch('/api/posts/:id', wrap(async (req, res) => {
+  const postId = assertUuid(req.params.id, 'post_id');
+  const user = req.user;
+  const title = req.body?.title == null ? null : String(req.body.title).trim();
+  const body = req.body?.body == null ? null : String(req.body.body).trim();
+  const platforms = req.body?.platforms;
+  if (body !== null && !body) throw new HttpError(400, 'body cannot be empty');
+  if (platforms !== undefined) {
+    if (!Array.isArray(platforms) || !platforms.length) {
+      throw new HttpError(400, 'platforms must be a non-empty list');
+    }
+    for (const p of platforms) {
+      if (!PLATFORMS.includes(p)) throw new HttpError(400, `unknown platform: ${p}`);
+    }
+  }
+
+  const existing = await readPost(postId);
+  if (!existing) throw new HttpError(404, 'post not found');
+  assertInScope(user, existing.business_id);
+
+  const nextTitle = title ?? existing.title;
+  const nextBody = body ?? existing.body;
+  const targets = platforms ?? existing.targets.map((t) => t.platform);
+  const live = existing.targets.filter((t) => t.state === 'PUBLISHED');
+
+  // A post that has never been published anywhere is just a draft: save it.
+  if (!live.length) {
+    const saved = await tx(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE social_posts SET title = $2, body = $3 WHERE id = $1 RETURNING id`,
+        [postId, nextTitle, nextBody],
+      );
+      await syncTargets(client, postId, targets);
+      await logAction(client, {
+        businessId: existing.business_id,
+        agentId: existing.agent_id,
+        action: 'POST_EDITED',
+        actor: user.email,
+        actorUserId: user.id,
+        detail: { platforms: targets },
+      });
+      return rows[0];
+    });
+    res.json({ ok: true, published: false, post: await readPost(saved.id) });
+    return;
+  }
+
+  // It is live somewhere, so the change needs approving before it goes out.
+  const approval = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO approvals (business_id, agent_id, payload_json)
+       VALUES ($1, $2, $3::jsonb)
+       RETURNING id, business_id, agent_id, status, payload_json, created_at`,
+      [existing.business_id, existing.agent_id, JSON.stringify({
+        type: 'post_update',
+        title: `Update "${existing.title}" on ${targets.join(', ')}`,
+        draft: nextBody,
+        channel: targets[0],
+        post_id: postId,
+        platforms: targets,
+        previous_body: existing.body,
+        source: { post_id: postId, edited_by: user.email },
+      })],
+    );
+    await client.query(
+      `UPDATE social_posts SET status = 'PENDING_UPDATE' WHERE id = $1`, [postId]);
+    await client.query(
+      `UPDATE social_post_targets SET state = 'UPDATE_PENDING'
+        WHERE post_id = $1 AND platform = ANY($2::text[]) AND state = 'PUBLISHED'`,
+      [postId, targets],
+    );
+    if (existing.agent_id) {
+      await settleAgent(client, {
+        agentId: existing.agent_id,
+        businessId: existing.business_id,
+        status: 'AWAITING_APPROVAL',
+        message: `Post update waiting: ${existing.title}`.slice(0, 500),
+      });
+    }
+    await logAction(client, {
+      businessId: existing.business_id,
+      agentId: existing.agent_id,
+      approvalId: rows[0].id,
+      action: 'POST_UPDATE_SUBMITTED',
+      actor: user.email,
+      actorUserId: user.id,
+      detail: { post_id: postId, platforms: targets },
+    });
+    return rows[0];
+  });
+
+  res.json({ ok: true, published: false, needs_approval: true, approval_id: approval.id });
+}));
+
+/** Keep the target rows matching the platforms the post should go to. */
+async function syncTargets(client, postId, platforms) {
+  await client.query(
+    `DELETE FROM social_post_targets
+      WHERE post_id = $1 AND NOT (platform = ANY($2::text[])) AND state <> 'PUBLISHED'`,
+    [postId, platforms],
+  );
+  for (const platform of platforms) {
+    await client.query(
+      `INSERT INTO social_post_targets (post_id, platform)
+       VALUES ($1, $2) ON CONFLICT (post_id, platform) DO NOTHING`,
+      [postId, platform],
+    );
+  }
+}
 
 // ---------------------------------------------------------- platform API
 // For whoever runs this deployment and sells it on. The hard rule here is
@@ -729,7 +1016,9 @@ app.post('/api/internal/agents/checkout', wrap(async (req, res) => {
       error: 'agent is paused — abort this run' });
     return;
   }
-  res.json({ ok: true, agent: result.agent });
+  // The enabled skills go back with the agent so n8n can shape the prompt
+  // around what this desk is actually meant to do.
+  res.json({ ok: true, agent: result.agent, skills: await readEnabledSkills(result.agent.id) });
 }));
 
 /** File a draft for human review. */
@@ -788,6 +1077,153 @@ app.post('/api/internal/approvals', wrap(async (req, res) => {
     return;
   }
   res.status(201).json({ ok: true, approval: result.approval });
+}));
+
+/**
+ * Pull a post in from a platform, or record one the bot has just published.
+ * Keyed on (platform, external_id), so re-importing the same post updates the
+ * copy here instead of making a second one.
+ */
+app.post('/api/internal/posts', wrap(async (req, res) => {
+  const { business_code: businessCode, title, body } = req.body ?? {};
+  const businessId = req.body?.business_id;
+  const department = req.body?.department ?? 'Marketing';
+  const targets = req.body?.targets;
+  if (!title || !body) throw new HttpError(400, 'title and body are required');
+  if (!Array.isArray(targets) || !targets.length) {
+    throw new HttpError(400, 'targets must be a non-empty list');
+  }
+  for (const t of targets) {
+    if (!PLATFORMS.includes(t?.platform)) throw new HttpError(400, `unknown platform: ${t?.platform}`);
+  }
+  if (!businessId && !businessCode) {
+    throw new HttpError(400, 'business_id or business_code is required');
+  }
+  if (businessId) assertUuid(businessId, 'business_id');
+
+  const result = await tx(async (client) => {
+    const { rows: found } = await client.query(
+      `SELECT b.id, b.is_active FROM businesses b
+        WHERE ($1::uuid IS NULL OR b.id = $1::uuid)
+          AND ($2::text IS NULL OR b.code = $2::text)`,
+      [businessId ?? null, businessCode ?? null],
+    );
+    const business = found[0];
+    if (!business) return { notFound: true };
+    if (!business.is_active) return { suspended: true };
+
+    // Does one of these platform copies already exist here?
+    const withIds = targets.filter((t) => t.external_id);
+    let postId = null;
+    if (withIds.length) {
+      const { rows } = await client.query(
+        `SELECT p.id FROM social_posts p
+           JOIN social_post_targets t ON t.post_id = p.id
+          WHERE p.business_id = $1
+            AND (t.platform, t.external_id) IN (
+              SELECT * FROM unnest($2::text[], $3::text[]))
+          LIMIT 1`,
+        [business.id, withIds.map((t) => t.platform), withIds.map((t) => String(t.external_id))],
+      );
+      postId = rows[0]?.id ?? null;
+    }
+
+    const { rows: agents } = await client.query(
+      `SELECT id FROM agents WHERE business_id = $1 AND department = $2`,
+      [business.id, department],
+    );
+    const agentId = agents[0]?.id ?? null;
+
+    if (postId) {
+      await client.query(
+        `UPDATE social_posts SET title = $2, body = $3, media_url = $4, status = 'PUBLISHED'
+          WHERE id = $1`,
+        [postId, title, body, req.body?.media_url ?? null],
+      );
+    } else {
+      const { rows } = await client.query(
+        `INSERT INTO social_posts (business_id, agent_id, title, body, media_url, status)
+         VALUES ($1, $2, $3, $4, $5, 'PUBLISHED')
+         RETURNING id`,
+        [business.id, agentId, title, body, req.body?.media_url ?? null],
+      );
+      postId = rows[0].id;
+    }
+
+    for (const target of targets) {
+      await client.query(
+        `INSERT INTO social_post_targets (post_id, platform, external_id, state, last_synced_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (post_id, platform) DO UPDATE
+           SET external_id = EXCLUDED.external_id,
+               state = EXCLUDED.state,
+               last_synced_at = now(),
+               last_error = NULL`,
+        [postId, target.platform, target.external_id ?? null,
+         target.external_id ? 'PUBLISHED' : 'NOT_PUBLISHED'],
+      );
+    }
+
+    await logAction(client, {
+      businessId: business.id,
+      agentId,
+      action: 'POST_SYNCED_IN',
+      actor: 'n8n',
+      detail: { platforms: targets.map((t) => t.platform) },
+    });
+    return { postId };
+  });
+
+  if (result.notFound) throw new HttpError(404, 'business not found');
+  if (result.suspended) {
+    res.status(423).json({ ok: false, status: 'SUSPENDED',
+      error: 'this business is suspended — post not synced' });
+    return;
+  }
+  res.status(201).json({ ok: true, post: await readPost(result.postId) });
+}));
+
+/** n8n reports back what happened to one platform copy. */
+app.post('/api/internal/posts/:id/targets', wrap(async (req, res) => {
+  const postId = assertUuid(req.params.id, 'post_id');
+  const { platform, external_id: externalId, error } = req.body ?? {};
+  const state = req.body?.state;
+  if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
+  if (!['PUBLISHED', 'FAILED', 'NOT_PUBLISHED'].includes(state)) {
+    throw new HttpError(400, 'state must be PUBLISHED, FAILED or NOT_PUBLISHED');
+  }
+
+  const post = await readPost(postId);
+  if (!post) throw new HttpError(404, 'post not found');
+
+  await tx(async (client) => {
+    await client.query(
+      `UPDATE social_post_targets
+          SET state = $3,
+              external_id = COALESCE($4, external_id),
+              last_synced_at = now(),
+              last_error = $5
+        WHERE post_id = $1 AND platform = $2`,
+      [postId, platform, state, externalId ?? null, error ?? null],
+    );
+    // Once nothing is still pending, the post itself is settled again.
+    await client.query(
+      `UPDATE social_posts SET status = 'PUBLISHED'
+        WHERE id = $1 AND NOT EXISTS (
+          SELECT 1 FROM social_post_targets
+           WHERE post_id = $1 AND state = 'UPDATE_PENDING')`,
+      [postId],
+    );
+    await logAction(client, {
+      businessId: post.business_id,
+      agentId: post.agent_id,
+      action: state === 'PUBLISHED' ? 'POST_SYNCED_OUT' : 'POST_SYNC_FAILED',
+      actor: 'n8n',
+      detail: { platform, state, error: error ?? null },
+    });
+  });
+
+  res.json({ ok: true, post: await readPost(postId) });
 }));
 
 /**

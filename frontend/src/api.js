@@ -46,6 +46,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ feedback }),
     }),
+  posts: (businessId, platform = 'all') => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (platform && platform !== 'all') params.set('platform', platform);
+    return request(`/api/posts?${params}`);
+  },
+  editPost: (id, body) =>
+    request(`/api/posts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  setSkill: (agentId, key, enabled) =>
+    request(`/api/agents/${agentId}/skills/${key}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    }),
   platform: {
     overview: () => request('/api/platform/overview'),
     addBusiness: (body) =>

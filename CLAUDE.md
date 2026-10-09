@@ -16,6 +16,7 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `backend/scripts/` | `create-user.js`, `reset-password.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
+| `frontend/src/components/PostsPanel.jsx` | Social posts, per-platform filter, editing. |
 | `frontend/public/` | PWA manifest, service worker and icons. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
@@ -23,6 +24,7 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `workflows/workflow_sales_lead.json` | Lead → checkout → Ollama → approval. |
 | `workflows/workflow_messenger_inbound.json` | Meta webhook → CRM agent → approval. |
 | `workflows/workflow_approval_dispatch.json` | Approved → the real channel sender. |
+| `workflows/workflow_post_sync.json` | Approved post edit → updates each platform copy. |
 | `docker-compose.yml` | postgres, ollama, n8n, backend, frontend on one network. |
 | `docker-compose.prod.yml` | Overlay for a deployment that is reachable online. |
 
@@ -87,6 +89,16 @@ the realtime path depends on triggers.
   only an `owner` may pause or resume an agent, checked with `requireOwner(user, businessId)`
   before anything is written. The UI hides what a reviewer cannot do, but hiding is not
   the enforcement — the route is.
+- **There is exactly one platform operator.** A partial unique index on
+  `users (is_platform_owner) WHERE is_platform_owner` enforces it, `create-user.js`
+  refuses a second with the current one's name, and `transfer-owner.js` moves it in one
+  transaction. Do not add a way to make more.
+- **A post edit is outbound work, so it goes through the gate.** `PATCH /api/posts/:id`
+  never touches a platform. If the post is live anywhere it files an approval of type
+  `post_update` and marks those targets `UPDATE_PENDING`; approving calls
+  `N8N_POST_SYNC_WEBHOOK_URL`, and each platform reports its own result back to
+  `/api/internal/posts/:id/targets`. Rejecting puts the targets back to `PUBLISHED` and
+  touches nothing outside. A post that is live nowhere is just a draft and saves directly.
 - **Suspension closes a business everywhere.** `resolveSession()` only counts memberships
   in businesses with `is_active`, so a suspended one leaves `businessIds` and every scope
   derived from it: REST reads, guarded writes, socket rooms. `/api/internal/*` checks it
@@ -119,6 +131,13 @@ the realtime path depends on triggers.
 ## Conventions
 
 - ES modules, Node 22, no TypeScript. Small files, plain functions.
+- Skills live in `skill_catalogue` (reference data, keyed by department) and
+  `agent_skills` (which ones a desk has on). `provision_business_agents()` switches them
+  all on for a new floor, checkout hands the enabled list to n8n so the prompt is built
+  from it, and only an owner may toggle one. Adding a skill means a row in the catalogue,
+  not a code change.
+- Platforms are `facebook | instagram | tiktok | shopee | lazada | x`, CHECK-constrained
+  on `social_post_targets`. Add one there and to `PLATFORMS` in `server.js` together.
 - Agent statuses: `IDLE | WORKING | AWAITING_APPROVAL | PAUSED`.
   Approval statuses: `PENDING | APPROVED | REJECTED`. Both are CHECK-constrained; add a
   value in `schema.sql` first.

@@ -231,6 +231,173 @@ BEGIN
         desk_x            = EXCLUDED.desk_x,
         desk_y            = EXCLUDED.desk_y;
   GET DIAGNOSTICS inserted = ROW_COUNT;
+
+  -- Every desk starts with its department's whole skill set switched on.
+  INSERT INTO agent_skills (agent_id, skill_key)
+  SELECT a.id, c.skill_key
+    FROM agents a
+    JOIN skill_catalogue c ON c.department = a.department
+   WHERE a.business_id = p_business_id
+  ON CONFLICT (agent_id, skill_key) DO NOTHING;
+
   RETURN inserted;
 END;
 $fn$ LANGUAGE plpgsql;
+
+-- ------------------------------------------------- one platform operator
+-- There is exactly one person who runs this deployment. Any extras from before
+-- this rule existed are demoted to ordinary accounts (they keep their business
+-- grants; they just stop being operators), oldest one kept.
+DO $do$
+DECLARE
+  demoted text;
+BEGIN
+  SELECT string_agg(email, ', ' ORDER BY created_at) INTO demoted
+    FROM users
+   WHERE is_platform_owner
+     AND id <> (SELECT id FROM users WHERE is_platform_owner
+                 ORDER BY created_at, id LIMIT 1);
+  IF demoted IS NOT NULL THEN
+    UPDATE users SET is_platform_owner = false
+     WHERE is_platform_owner
+       AND id <> (SELECT id FROM users WHERE is_platform_owner
+                   ORDER BY created_at, id LIMIT 1);
+    RAISE NOTICE 'demoted extra platform operators: %', demoted;
+  END IF;
+END
+$do$;
+
+-- A partial unique index over a constant: at most one row may carry the flag.
+-- Moving it means clearing the old one and setting the new one in the same
+-- transaction, which scripts/transfer-owner.js does.
+CREATE UNIQUE INDEX IF NOT EXISTS users_single_platform_owner
+  ON users ((is_platform_owner)) WHERE is_platform_owner;
+
+-- -------------------------------------------------------------- skills
+-- What each department's agent is actually good at. The catalogue is reference
+-- data shared by every business; agent_skills is which ones a given desk has
+-- switched on. n8n reads the enabled list at checkout and shapes the prompt
+-- from it, so turning a skill off changes what the model is asked to do.
+
+CREATE TABLE IF NOT EXISTS skill_catalogue (
+  department text NOT NULL,
+  skill_key  text NOT NULL,
+  name       text NOT NULL,
+  summary    text NOT NULL,
+  sort       int  NOT NULL DEFAULT 0,
+  PRIMARY KEY (department, skill_key)
+);
+
+CREATE TABLE IF NOT EXISTS agent_skills (
+  agent_id   uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  skill_key  text NOT NULL,
+  enabled    boolean NOT NULL DEFAULT true,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (agent_id, skill_key)
+);
+
+CREATE INDEX IF NOT EXISTS agent_skills_enabled_idx
+  ON agent_skills (agent_id) WHERE enabled;
+
+INSERT INTO skill_catalogue (department, skill_key, name, summary, sort) VALUES
+  -- Sales
+  ('Sales','lead_qualification','Lead qualification','Reads an enquiry and works out budget, urgency and whether it is worth quoting.',1),
+  ('Sales','quotation','Quotation drafting','Turns a scope into an itemised PHP quote with inclusions and validity.',2),
+  ('Sales','follow_up','Follow-up sequences','Chases a quote that has gone quiet, politely, on a schedule.',3),
+  ('Sales','appointment_booking','Appointment booking','Offers site-visit slots and confirms them against the calendar.',4),
+  ('Sales','upsell','Upsell suggestions','Spots the add-on worth mentioning without padding the quote.',5),
+  -- Marketing
+  ('Marketing','ads_manager','Social media ads manager','Plans and adjusts paid campaigns: budget, audience, placement, and what to cut when cost per lead climbs.',1),
+  ('Marketing','content_calendar','Content calendar','Plans a month of posts around seasons, promos and what sold last month.',2),
+  ('Marketing','copywriting','Caption and copywriting','Writes posts and captions in the business voice, in the right length per platform.',3),
+  ('Marketing','promo_planning','Promo planning','Designs an offer with real numbers: discount, margin, end date.',4),
+  ('Marketing','performance_report','Performance reporting','Reads reach, clicks and cost per lead, and says plainly what to change.',5),
+  -- CRM
+  ('CRM','dm_replies','Messenger and DM replies','Answers Messenger, Instagram and marketplace chats in the business voice.',1),
+  ('CRM','review_responses','Review responses','Replies to public reviews, including the bad ones, without arguing.',2),
+  ('CRM','customer_history','Customer history recall','Pulls up what this customer bought and what went wrong last time.',3),
+  ('CRM','escalation_triage','Escalation triage','Decides what a human must handle now rather than later.',4),
+  ('CRM','csat_followup','Satisfaction follow-up','Checks in after a job and asks for a review when it went well.',5),
+  -- Inventory
+  ('Inventory','stock_monitoring','Stock monitoring','Watches levels against what is selling and flags what is about to run out.',1),
+  ('Inventory','reorder_alerts','Reorder alerts','Calculates reorder points from lead time and demand, and raises them.',2),
+  ('Inventory','supplier_rfq','Supplier RFQ drafting','Writes requests for quotes and compares what comes back.',3),
+  ('Inventory','catalogue_hygiene','Catalogue hygiene','Keeps SKUs, prices and descriptions consistent across platforms.',4),
+  -- HR
+  ('HR','job_posts','Job post drafting','Writes a job ad that describes the actual work and the actual pay.',1),
+  ('HR','applicant_screening','Applicant screening','Sorts applicants against the role and drafts the replies either way.',2),
+  ('HR','onboarding','Onboarding checklists','Builds the first-week plan: requirements, accounts, training, buddy.',3),
+  ('HR','shift_planning','Shift planning','Builds a roster that covers the work without burning overtime.',4),
+  ('HR','policy_answers','Policy questions','Answers leave, benefits and conduct questions from the handbook.',5),
+  -- Admin
+  ('Admin','invoicing','Invoice drafting','Turns a completed job into an invoice with the right terms.',1),
+  ('Admin','expense_coding','Expense categorisation','Codes receipts to accounts and flags the ones that look wrong.',2),
+  ('Admin','document_filing','Document filing','Names and files permits, contracts and receipts where they can be found.',3),
+  ('Admin','compliance_reminders','Compliance reminders','Tracks BIR filings, permits and renewals before they lapse.',4),
+  -- Logistics
+  ('Logistics','dispatch_scheduling','Dispatch scheduling','Assigns jobs to crews and vehicles against the day.',1),
+  ('Logistics','route_planning','Route planning','Orders stops sensibly for traffic and delivery windows.',2),
+  ('Logistics','delivery_updates','Delivery updates','Tells the customer where their order is, before they ask.',3),
+  ('Logistics','courier_booking','Courier booking','Books third-party couriers and tracks what they promised.',4),
+  -- Security
+  ('Security','access_review','Access review','Checks who can reach what, and flags accounts that should be gone.',1),
+  ('Security','incident_triage','Incident triage','Sorts an alert into noise, watch, or wake someone up.',2),
+  ('Security','phishing_detection','Phishing detection','Reads suspicious messages and says whether to trust them.',3),
+  ('Security','backup_verification','Backup verification','Confirms backups actually ran and can actually be restored.',4),
+  -- Production
+  ('Production','job_scheduling','Job order scheduling','Sequences work orders against crew, materials and deadlines.',1),
+  ('Production','qa_checklists','Quality checklists','Builds and checks the sign-off list for each job type.',2),
+  ('Production','materials_estimate','Materials estimate','Works out what a job needs and what it will cost in PHP.',3),
+  ('Production','progress_reporting','Progress reporting','Reports where each job stands, with photos where it helps.',4)
+ON CONFLICT (department, skill_key) DO UPDATE
+  SET name = EXCLUDED.name, summary = EXCLUDED.summary, sort = EXCLUDED.sort;
+
+-- ------------------------------------------------- social posts and sync
+-- A post the business puts out, and where it has been put. The app is the
+-- place it is edited; the platforms are where copies live. An edit never goes
+-- straight out — it files an approval like everything else, and only the
+-- dispatch workflow updates the platforms once a human says yes.
+
+CREATE TABLE IF NOT EXISTS social_posts (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  agent_id    uuid REFERENCES agents(id) ON DELETE SET NULL,
+  title       text NOT NULL,
+  body        text NOT NULL,
+  media_url   text,
+  status      text NOT NULL DEFAULT 'DRAFT'
+              CHECK (status IN ('DRAFT','PENDING_UPDATE','PUBLISHED','ARCHIVED')),
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS social_post_targets (
+  post_id        uuid NOT NULL REFERENCES social_posts(id) ON DELETE CASCADE,
+  platform       text NOT NULL
+                 CHECK (platform IN ('facebook','instagram','tiktok','shopee','lazada','x')),
+  external_id    text,
+  state          text NOT NULL DEFAULT 'NOT_PUBLISHED'
+                 CHECK (state IN ('NOT_PUBLISHED','PUBLISHED','UPDATE_PENDING','FAILED')),
+  last_synced_at timestamptz,
+  last_error     text,
+  PRIMARY KEY (post_id, platform)
+);
+
+CREATE INDEX IF NOT EXISTS social_posts_business_idx
+  ON social_posts (business_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS social_post_targets_platform_idx
+  ON social_post_targets (platform, state);
+
+-- One row per platform copy, so n8n can be told exactly which ones to update.
+CREATE UNIQUE INDEX IF NOT EXISTS social_post_targets_external_idx
+  ON social_post_targets (platform, external_id) WHERE external_id IS NOT NULL;
+
+DROP TRIGGER IF EXISTS social_posts_touch ON social_posts;
+CREATE TRIGGER social_posts_touch
+  BEFORE UPDATE ON social_posts
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS social_posts_notify ON social_posts;
+CREATE TRIGGER social_posts_notify
+  AFTER INSERT OR UPDATE OR DELETE ON social_posts
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('social_post');

@@ -47,6 +47,21 @@ const password = values.password ?? crypto.randomBytes(12).toString('base64url')
 const generated = !values.password;
 
 try {
+  // There is exactly one platform operator. Refuse early with the name of the
+  // current one rather than letting the unique index throw.
+  if (values['platform-owner']) {
+    const { rows } = await q('SELECT email FROM users WHERE is_platform_owner');
+    if (rows.length) {
+      console.error(`
+  ${rows[0].email} is already the platform operator, and there is only ever one.
+
+  To move it to someone else:
+      node scripts/transfer-owner.js --to <their email>
+`);
+      process.exit(1);
+    }
+  }
+
   const user = await createUser({
     email: values.email,
     password,

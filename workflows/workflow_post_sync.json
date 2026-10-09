@@ -1,0 +1,380 @@
+{
+  "name": "Post Sync — push an approved edit to the platforms",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "post-sync",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000001",
+      "name": "Approved Edit",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -760,
+        300
+      ],
+      "webhookId": "post-sync",
+      "notes": "The backend calls this only after a human approved the edit. The body carries the post, its targets and the platforms the edit is meant for."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per platform copy that actually needs updating, carrying the\n// external id the platform knows the post by.\nconst body = $input.first().json.body;\nconst post = body.post;\nconst wanted = body.payload.platforms ?? [];\n\nreturn post.targets\n  .filter((t) => wanted.includes(t.platform) && t.external_id)\n  .map((t) => ({ json: {\n    post_id: post.id,\n    platform: t.platform,\n    external_id: t.external_id,\n    body: body.payload.draft,\n    title: post.title,\n  } }));"
+      },
+      "id": "d1000000-0000-4000-8000-000000000002",
+      "name": "One Item Per Platform",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.platform }}",
+                    "rightValue": "facebook"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "facebook"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.platform }}",
+                    "rightValue": "instagram"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "instagram"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.platform }}",
+                    "rightValue": "shopee"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "shopee"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "other"
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000003",
+      "name": "Which Platform",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $json.external_id }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $env.META_PAGE_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.body }) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000004",
+      "name": "Edit Facebook Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        120
+      ],
+      "notes": "A page post's text is edited in place with POST /{post-id}. Needs pages_manage_posts on the token."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Instagram does not let the Graph API edit a published caption. The honest\n// thing is to report it rather than pretend the platform was updated: the\n// dashboard then shows that copy as failed, with this reason on it.\nreturn $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: 'Instagram captions cannot be edited through the API — update this one in the app, or delete and repost.',\n} }));"
+      },
+      "id": "d1000000-0000-4000-8000-000000000005",
+      "name": "Instagram Cannot Edit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Replace with the Shopee Open Platform item-update call. Until then the\n// dashboard is told plainly that nothing happened.\nreturn $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: 'Shopee sender is not wired up yet.',\n} }));"
+      },
+      "id": "d1000000-0000-4000-8000-000000000006",
+      "name": "Shopee — PLACEHOLDER",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: 'No sender is wired up for ' + item.json.platform + ' yet.',\n} }));"
+      },
+      "id": "d1000000-0000-4000-8000-000000000007",
+      "name": "Unwired Platform",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn the Facebook response into the same shape the other branches use.\nreturn $input.all().map((item) => {\n  const ok = item.json.statusCode === 200;\n  const source = $('One Item Per Platform').all()[0].json;\n  return { json: {\n    post_id: item.json.body?.post_id ?? source.post_id,\n    platform: 'facebook',\n    external_id: source.external_id,\n    state: ok ? 'PUBLISHED' : 'FAILED',\n    error: ok ? null : ('Facebook refused the edit: ' + JSON.stringify(item.json.body ?? {}).slice(0, 200)),\n  } };\n});"
+      },
+      "id": "d1000000-0000-4000-8000-000000000008",
+      "name": "Read Facebook Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/posts/{{ $json.post_id }}/targets",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ platform: $json.platform, state: $json.state, external_id: $json.external_id, error: $json.error }) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000009",
+      "name": "Report Back",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "notes": "Each platform reports its own result, so the dashboard shows exactly which copies went out and which did not."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true }) }}",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-00000000000a",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        620,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Approved Edit": {
+      "main": [
+        [
+          {
+            "node": "One Item Per Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Item Per Platform": {
+      "main": [
+        [
+          {
+            "node": "Which Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Which Platform": {
+      "main": [
+        [
+          {
+            "node": "Edit Facebook Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Instagram Cannot Edit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shopee — PLACEHOLDER",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unwired Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Facebook Post": {
+      "main": [
+        [
+          {
+            "node": "Read Facebook Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Facebook Result": {
+      "main": [
+        [
+          {
+            "node": "Report Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instagram Cannot Edit": {
+      "main": [
+        [
+          {
+            "node": "Report Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopee — PLACEHOLDER": {
+      "main": [
+        [
+          {
+            "node": "Report Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unwired Platform": {
+      "main": [
+        [
+          {
+            "node": "Report Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Back": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "virtual-office-dev"
+  }
+}

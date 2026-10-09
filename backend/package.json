@@ -10,7 +10,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "create-user": "node scripts/create-user.js",
-    "reset-password": "node scripts/reset-password.js"
+    "reset-password": "node scripts/reset-password.js",
+    "transfer-owner": "node scripts/transfer-owner.js"
   },
   "dependencies": {
     "cors": "2.8.5",

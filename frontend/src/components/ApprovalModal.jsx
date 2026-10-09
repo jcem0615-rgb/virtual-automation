@@ -10,12 +10,13 @@ const CHANNEL_LABEL = {
 };
 
 export default function ApprovalModal({
-  agent, approval, canPause = true, onClose, onApprove, onReject, onKill,
+  agent, approval, canPause = true, onClose, onApprove, onReject, onKill, onToggleSkill,
 }) {
   const [feedback, setFeedback] = useState('');
   const [rejecting, setRejecting] = useState(false);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
+  const [skillBusy, setSkillBusy] = useState(null);
 
   useEffect(() => {
     setFeedback('');
@@ -131,6 +132,68 @@ export default function ApprovalModal({
               Nothing is waiting on you for this desk. Last activity:{' '}
               <span className="text-slate-200">{agent.last_message ?? '—'}</span>
             </p>
+          )}
+
+          {/* What this desk is actually asked to do. An owner can switch a
+              skill off and the model stops being asked for it. */}
+          {agent.skills?.length > 0 && (
+            <div>
+              <h3 className="font-mono text-xs uppercase tracking-wide text-slate-500">
+                What {agent.name.split(' ')[0]} does
+              </h3>
+              <ul className="mt-2 space-y-1.5">
+                {agent.skills.map((skill) => (
+                  <li
+                    key={skill.key}
+                    className={`flex items-start gap-3 rounded-lg border p-2.5 ${
+                      skill.enabled
+                        ? 'border-slate-800 bg-slate-950'
+                        : 'border-slate-800/60 bg-slate-950/40'
+                    }`}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className={`block text-sm ${skill.enabled ? 'text-slate-200' : 'text-slate-500'}`}>
+                        {skill.name}
+                      </span>
+                      <span className="block text-xs text-slate-500">{skill.summary}</span>
+                    </span>
+                    {canPause ? (
+                      <button
+                        disabled={skillBusy !== null}
+                        onClick={async () => {
+                          setSkillBusy(skill.key);
+                          setError(null);
+                          try {
+                            await onToggleSkill(agent.id, skill.key, !skill.enabled);
+                          } catch (err) {
+                            setError(err.message ?? 'Could not change that');
+                          } finally {
+                            setSkillBusy(null);
+                          }
+                        }}
+                        className={`shrink-0 rounded-full border px-2.5 py-1 text-[11px] disabled:opacity-50 ${
+                          skill.enabled
+                            ? 'border-emerald-800 bg-emerald-950 text-emerald-300'
+                            : 'border-slate-700 text-slate-500'
+                        }`}
+                      >
+                        {skillBusy === skill.key ? '…' : skill.enabled ? 'On' : 'Off'}
+                      </button>
+                    ) : (
+                      <span
+                        className={`shrink-0 rounded-full border px-2.5 py-1 text-[11px] ${
+                          skill.enabled
+                            ? 'border-emerald-900 text-emerald-400'
+                            : 'border-slate-700 text-slate-600'
+                        }`}
+                      >
+                        {skill.enabled ? 'On' : 'Off'}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
 
           {error && (

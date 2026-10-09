@@ -62,6 +62,7 @@ services:
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
       N8N_RETRY_WEBHOOK_URL: http://n8n:5678/webhook/sales-lead
       N8N_DISPATCH_WEBHOOK_URL: http://n8n:5678/webhook/approval-dispatch
+      N8N_POST_SYNC_WEBHOOK_URL: http://n8n:5678/webhook/post-sync
       # Local development runs over http, so the session cookie cannot be
       # Secure here. docker-compose.prod.yml turns it back on.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}

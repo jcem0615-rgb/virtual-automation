@@ -8,6 +8,7 @@ import VirtualOfficeCanvas from './components/VirtualOfficeCanvas.jsx';
 import ApprovalModal from './components/ApprovalModal.jsx';
 import Login from './Login.jsx';
 import ControlRoom from './ControlRoom.jsx';
+import PostsPanel from './components/PostsPanel.jsx';
 
 const STATUS_PILL = {
   IDLE: 'bg-slate-800 text-slate-300',
@@ -265,6 +266,12 @@ export default function App() {
         <section className="min-w-0 space-y-4">
           <VirtualOfficeCanvas agents={agents} onSelectAgent={(a) => setSelectedAgentId(a.id)} />
 
+          <PostsPanel
+            businessId={businessId}
+            refreshKey={logs[0]?.id ?? 0}
+            onSignedOut={signedOut}
+          />
+
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {agents.map((agent) => (
               <button
@@ -346,6 +353,12 @@ export default function App() {
           onApprove={(id) => act(() => api.approve(id))}
           onReject={(id, feedback) => act(() => api.reject(id, feedback))}
           onKill={(agentId, resume) => act(() => api.kill(agentId, resume))}
+          onToggleSkill={(agentId, key, enabled) => act(async () => {
+            const result = await api.setSkill(agentId, key, enabled);
+            // The socket carries the agent row back too, but update now so the
+            // switch does not sit there looking unmoved.
+            setAgents((current) => current.map((a) => (a.id === agentId ? result.agent : a)));
+          })}
         />
       )}
     </div>
