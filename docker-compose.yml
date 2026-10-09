@@ -73,6 +73,10 @@ services:
       N8N_RETRY_WEBHOOK_URL: http://n8n:5678/webhook/sales-lead
       N8N_DISPATCH_WEBHOOK_URL: http://n8n:5678/webhook/approval-dispatch
       N8N_POST_SYNC_WEBHOOK_URL: http://n8n:5678/webhook/post-sync
+      N8N_PRODUCT_SYNC_WEBHOOK_URL: http://n8n:5678/webhook/product-sync
+      # 32 bytes, base64 or hex. Marketplace credentials are encrypted with it,
+      # so losing it means reconnecting every seller account.
+      CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
       # Local development runs over http, so the session cookie cannot be
       # Secure here. docker-compose.prod.yml turns it back on.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}

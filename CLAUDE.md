@@ -13,10 +13,13 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `backend/server.js` | Express + Socket.io. REST for the UI and n8n, realtime fan-out. |
 | `backend/db.js` | pg pool, `tx()` helper, reconnecting LISTEN client. |
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
+| `backend/secrets.js` | AES-256-GCM for marketplace credentials. Never serves a value. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
 | `frontend/src/components/PostsPanel.jsx` | Social posts, per-platform filter, editing. |
+| `frontend/src/components/ProductsPanel.jsx` | Catalogue, and which shops carry each item. |
+| `frontend/src/components/AccountsPanel.jsx` | Connected seller accounts, one per shop. |
 | `frontend/public/` | PWA manifest, service worker and icons. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
@@ -25,6 +28,7 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `workflows/workflow_messenger_inbound.json` | Meta webhook → CRM agent → approval. |
 | `workflows/workflow_approval_dispatch.json` | Approved → the real channel sender. |
 | `workflows/workflow_post_sync.json` | Approved post edit → updates each platform copy. |
+| `workflows/workflow_product_sync.json` | Approved listing → Shopee, Lazada, TikTok Shop. |
 | `docker-compose.yml` | postgres, ollama, n8n, backend, frontend on one network. |
 | `docker-compose.prod.yml` | Overlay for a deployment that is reachable online. |
 
@@ -105,6 +109,20 @@ the realtime path depends on triggers.
   `FAILED` with a readable reason rather than skipping it: Instagram and TikTok cannot
   edit a published post, Shopee cannot create a listing from a caption, and an unset
   credential names the variable. Keep that; a silently skipped platform looks sent.
+- **Credentials are write-only from the browser.** A business connects several seller
+  accounts; each one's keys are encrypted with AES-256-GCM under `CREDENTIALS_KEY` in
+  `secrets.js`. `describeCredentials()` is all the dashboard ever sees — which fields are
+  set, a tail for identifiers only, never a secret's value, not even its last characters.
+  The one way back out is `GET /api/internal/accounts/:id/credentials`, token-gated, and
+  it writes `ACCOUNT_CREDENTIALS_READ` to the log every time. Do not add a route that
+  returns them to a session.
+- **A product reaching a marketplace is outbound work.** `POST /api/products/:id/publish`
+  and an edit to a listed product both file an approval and mark the listings
+  `PUBLISH_PENDING` / `UPDATE_PENDING`; approving calls `N8N_PRODUCT_SYNC_WEBHOOK_URL`
+  and each account reports back to `/api/internal/products/:id/listings`. Listings are
+  per **account**, not per platform, because a business can hold two shops on one
+  marketplace. The approval sits on the Inventory desk (`deskFor()`), so catalogue work
+  shows up on the floor like everything else.
 - **Suspension closes a business everywhere.** `resolveSession()` only counts memberships
   in businesses with `is_active`, so a suspended one leaves `businessIds` and every scope
   derived from it: REST reads, guarded writes, socket rooms. `/api/internal/*` checks it
@@ -143,13 +161,21 @@ the realtime path depends on triggers.
   from it, and only an owner may toggle one. Adding a skill means a row in the catalogue,
   not a code change.
 - Platforms are `facebook | instagram | tiktok | shopee | lazada | x`, CHECK-constrained
-  on `social_post_targets`. Add one there and to `PLATFORMS` in `server.js` together.
+  on `social_post_targets` and `platform_accounts`. Add one there and to `PLATFORMS` in
+  `server.js` together, plus a branch in the sync workflows.
+- A marketplace will not take a listing without its own category id, logistics and
+  weight. `products.platform_meta` holds those per platform, and
+  `POST /api/products/:id/publish` refuses up front rather than letting the call fail
+  halfway out. `REQUIRED_CREDENTIALS` in `secrets.js` does the same for account keys.
 - Agent statuses: `IDLE | WORKING | AWAITING_APPROVAL | PAUSED`.
   Approval statuses: `PENDING | APPROVED | REJECTED`. Both are CHECK-constrained; add a
   value in `schema.sql` first.
 - Approval `payload_json` shape: `{ type, title, draft, channel, recipient, source, … }`.
   `source` is the original request and is what gets replayed on reject. `channel`
   (`email`, `meta_dm`, `shopee`) drives routing in the dispatch workflow.
+- Each figure carries a two-line plate: name, then `role_title`. The plates have a
+  background on purpose — two people standing close used to produce unreadable overlapping
+  text. `separate()` keeps stopped figures 92px apart, which is what two lines need.
 - Phaser owns the canvas; React never re-renders it. Push data in through
   `scene.syncAgents(agents)`. To add a visual state, extend `applyStatus()` — that is
   also where a status decides what the figure *does* (sit at the desk, stand beside it,

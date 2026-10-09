@@ -196,6 +196,57 @@ goes out as a video, anything else as a photo post.
 **Facebook** needs `META_PAGE_ID` to publish something new; editing only needs the post
 id it already has.
 
+## Selling: shops, products and listings
+
+A business can connect **several accounts on the same platform** — two Shopee shops and a
+Lazada seller account are three separate places the same product can live.
+
+**Connect a shop** in *Connected accounts* on the floor (owners only). Each needs its own
+keys:
+
+| Platform | Needs |
+| --- | --- |
+| Shopee | `partner_id`, `partner_key`, `shop_id`, `access_token` |
+| Lazada | `app_key`, `app_secret`, `access_token` |
+| TikTok Shop | `app_key`, `app_secret`, `access_token`, `shop_cipher` |
+| Facebook / Instagram | `page_access_token` |
+
+Credentials are encrypted with AES-256-GCM before they are stored, and **never come back
+to a browser** — the panel shows which fields are set and nothing else. Only the
+automation reads them, through a token-gated endpoint that logs every read. Set
+`CREDENTIALS_KEY` (32 bytes, base64) before connecting anything:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+Each account syncs on its own and can be paused without touching the others.
+
+**Add a product** in *Products*, then **choose which shops carry it**. Listing it files an
+approval like any other outbound work; approving it is what creates the listing. Each shop
+reports its own result, so you can see that Shopee took it and TikTok refused, with the
+reason.
+
+Marketplaces insist on their own category id, a shipping channel and a weight before
+they will accept a listing, so those are asked for up front — a product with no category
+for Shopee is refused here rather than failing halfway out.
+
+The list filters **per platform and per account**, so two shops on the same marketplace
+never get mixed up.
+
+### What each marketplace can do
+
+| | Create a listing | Edit a live one |
+| --- | --- | --- |
+| **Shopee** | ✅ `product/add_item` | ✅ `product/update_item` |
+| **Lazada** | ✅ `/product/create` (XML payload) | ✅ `/product/update` |
+| **TikTok Shop** | ✅ `products/202309` | ✅ same endpoint, by id |
+
+Each is signed the way that marketplace documents it: Shopee over
+`partner_id + path + timestamp + access_token + shop_id`, Lazada over the path plus its
+parameters sorted and concatenated, TikTok Shop over the app secret wrapping the sorted
+parameters and the body. The Lazada host follows the account's region.
+
 ## Connecting a Facebook or Instagram page
 
 The CRM agent can answer Messenger, and the reply still waits for a human. Nothing is
@@ -338,11 +389,14 @@ the realtime path runs on triggers, so mocks prove nothing.
 | `backend/server.js` | Express + Socket.io. REST for the UI and n8n, realtime fan-out. |
 | `backend/db.js` | pg pool, `tx()` helper, reconnecting LISTEN client. |
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
+| `backend/secrets.js` | Encrypts the marketplace credentials sellers connect. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`, `transfer-owner.js`. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | The platform operator's portal. |
 | `frontend/src/components/PostsPanel.jsx` | Social posts and the per-platform filter. |
+| `frontend/src/components/ProductsPanel.jsx` | Catalogue and which shops carry each item. |
+| `frontend/src/components/AccountsPanel.jsx` | Connected seller accounts. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene: the floor, and the staff who walk it. |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
 | `workflows/*.json` | n8n exports (sales lead, Messenger inbound, dispatch). |

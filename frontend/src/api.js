@@ -64,6 +64,35 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ enabled }),
     }),
+  accounts: (businessId, platform) => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (platform && platform !== 'all') params.set('platform', platform);
+    return request(`/api/accounts?${params}`);
+  },
+  connectAccount: (body) =>
+    request('/api/accounts', { method: 'POST', body: JSON.stringify(body) }),
+  updateAccount: (id, body) =>
+    request(`/api/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  disconnectAccount: (id) => request(`/api/accounts/${id}`, { method: 'DELETE' }),
+
+  products: (businessId, { platform, accountId } = {}) => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (accountId) params.set('account_id', accountId);
+    else if (platform && platform !== 'all') params.set('platform', platform);
+    return request(`/api/products?${params}`);
+  },
+  createProduct: (body) =>
+    request('/api/products', { method: 'POST', body: JSON.stringify(body) }),
+  editProduct: (id, body) =>
+    request(`/api/products/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  listProduct: (id, accountIds) =>
+    request(`/api/products/${id}/publish`, {
+      method: 'POST',
+      body: JSON.stringify({ account_ids: accountIds }),
+    }),
+
   platform: {
     overview: () => request('/api/platform/overview'),
     addBusiness: (body) =>

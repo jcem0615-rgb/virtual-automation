@@ -407,3 +407,93 @@ CREATE TRIGGER social_posts_notify
 ALTER TABLE social_post_targets DROP CONSTRAINT IF EXISTS social_post_targets_state_check;
 ALTER TABLE social_post_targets ADD CONSTRAINT social_post_targets_state_check
   CHECK (state IN ('NOT_PUBLISHED','PUBLISH_PENDING','PUBLISHED','UPDATE_PENDING','FAILED'));
+
+-- ------------------------------------------------- connected accounts
+-- A business can have several accounts on the same platform: two Shopee
+-- shops, a Lazada seller account, a TikTok Shop. Each one is connected
+-- separately and can be synced or paused on its own.
+--
+-- Credentials are encrypted with AES-256-GCM under CREDENTIALS_KEY and are
+-- never returned by the dashboard API — only n8n reads them back, through the
+-- internal token, and every read is written to action_logs.
+
+CREATE TABLE IF NOT EXISTS platform_accounts (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id    uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  platform       text NOT NULL
+                 CHECK (platform IN ('facebook','instagram','tiktok','shopee','lazada','x')),
+  label          text NOT NULL,                -- what the owner calls it
+  external_id    text,                         -- shop id, seller id, page id
+  region         text,                         -- PH, SG, MY … drives the API host
+  credentials    text,                         -- AES-256-GCM, never served to a browser
+  sync_enabled   boolean NOT NULL DEFAULT true,
+  last_synced_at timestamptz,
+  last_error     text,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS platform_accounts_business_idx
+  ON platform_accounts (business_id, platform);
+-- One account per shop id per platform, per business.
+CREATE UNIQUE INDEX IF NOT EXISTS platform_accounts_external_idx
+  ON platform_accounts (business_id, platform, external_id) WHERE external_id IS NOT NULL;
+
+DROP TRIGGER IF EXISTS platform_accounts_touch ON platform_accounts;
+CREATE TRIGGER platform_accounts_touch
+  BEFORE UPDATE ON platform_accounts
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+-- ------------------------------------------------------------ products
+-- The business's own catalogue. A product lives here and is listed on
+-- whichever connected accounts its owner picks.
+
+CREATE TABLE IF NOT EXISTS products (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id  uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  sku          text NOT NULL,
+  name         text NOT NULL,
+  description  text NOT NULL DEFAULT '',
+  price        numeric(12,2) NOT NULL DEFAULT 0 CHECK (price >= 0),
+  currency     char(3) NOT NULL DEFAULT 'PHP',
+  stock        int NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  weight_kg    numeric(8,3) NOT NULL DEFAULT 0.5 CHECK (weight_kg > 0),
+  images       jsonb NOT NULL DEFAULT '[]'::jsonb,
+  -- Per-platform bits a marketplace insists on: category ids, attributes,
+  -- logistics. Shaped { shopee: {...}, lazada: {...}, tiktok: {...} }.
+  platform_meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+  status       text NOT NULL DEFAULT 'DRAFT'
+               CHECK (status IN ('DRAFT','LISTED','ARCHIVED')),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (business_id, sku)
+);
+
+CREATE TABLE IF NOT EXISTS product_listings (
+  product_id     uuid NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  account_id     uuid NOT NULL REFERENCES platform_accounts(id) ON DELETE CASCADE,
+  external_id    text,
+  state          text NOT NULL DEFAULT 'NOT_LISTED'
+                 CHECK (state IN ('NOT_LISTED','PUBLISH_PENDING','LISTED','UPDATE_PENDING','FAILED')),
+  last_synced_at timestamptz,
+  last_error     text,
+  PRIMARY KEY (product_id, account_id)
+);
+
+CREATE INDEX IF NOT EXISTS products_business_idx ON products (business_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS product_listings_account_idx ON product_listings (account_id, state);
+
+DROP TRIGGER IF EXISTS products_touch ON products;
+CREATE TRIGGER products_touch
+  BEFORE UPDATE ON products
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+DROP TRIGGER IF EXISTS products_notify ON products;
+CREATE TRIGGER products_notify
+  AFTER INSERT OR UPDATE OR DELETE ON products
+  FOR EACH ROW EXECUTE FUNCTION notify_office_event('product');
+
+-- Social posts can also name the account they went out on, now that a
+-- business may hold more than one per platform.
+ALTER TABLE social_post_targets ADD COLUMN IF NOT EXISTS account_id uuid
+  REFERENCES platform_accounts(id) ON DELETE SET NULL;

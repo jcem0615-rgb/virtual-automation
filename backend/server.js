@@ -16,6 +16,10 @@ import {
   HttpError, assertUuid, businessClause,
 } from './db.js';
 import {
+  encryptCredentials, decryptCredentials, describeCredentials,
+  missingCredentials, REQUIRED_CREDENTIALS, credentialsKeyIsSet,
+} from './secrets.js';
+import {
   COOKIE_NAME, readCookie, resolveSession, requireUser, scopeFor,
   authenticate, createSession, destroySession, setSessionCookie,
   clearSessionCookie, secretsMatch, purgeExpiredSessions,
@@ -27,6 +31,7 @@ const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN ?? 'dev-internal-token';
 const N8N_RETRY_WEBHOOK_URL = process.env.N8N_RETRY_WEBHOOK_URL ?? '';
 const N8N_DISPATCH_WEBHOOK_URL = process.env.N8N_DISPATCH_WEBHOOK_URL ?? '';
 const N8N_POST_SYNC_WEBHOOK_URL = process.env.N8N_POST_SYNC_WEBHOOK_URL ?? '';
+const N8N_PRODUCT_SYNC_WEBHOOK_URL = process.env.N8N_PRODUCT_SYNC_WEBHOOK_URL ?? '';
 
 const app = express();
 
@@ -422,17 +427,26 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
   // goes to its own workflow, which updates each platform copy in place.
   const payload = outcome.payload_json ?? {};
   const isPostUpdate = payload.type === 'post_update' || payload.type === 'post_publish';
-  const dispatch = await callWebhook(
-    isPostUpdate ? N8N_POST_SYNC_WEBHOOK_URL : N8N_DISPATCH_WEBHOOK_URL,
-    {
-      approval_id: outcome.id,
-      business_id: outcome.business_id,
-      agent_id: outcome.agent_id,
-      payload,
-      ...(isPostUpdate ? { post: await readPost(payload.post_id) } : {}),
-    },
-    isPostUpdate ? 'post sync' : 'dispatch',
-  );
+  const isProduct = payload.type === 'product_publish' || payload.type === 'product_update';
+  const target = isProduct ? N8N_PRODUCT_SYNC_WEBHOOK_URL
+    : isPostUpdate ? N8N_POST_SYNC_WEBHOOK_URL
+    : N8N_DISPATCH_WEBHOOK_URL;
+  const dispatch = await callWebhook(target, {
+    approval_id: outcome.id,
+    business_id: outcome.business_id,
+    agent_id: outcome.agent_id,
+    payload,
+    ...(isPostUpdate ? { post: await readPost(payload.post_id) } : {}),
+    ...(isProduct ? { product: await readProduct(payload.product_id) } : {}),
+  }, isProduct ? 'product sync' : isPostUpdate ? 'post sync' : 'dispatch');
+
+  if (isProduct && !dispatch.ok) {
+    await q(
+      `UPDATE product_listings SET state = 'FAILED', last_error = $2
+        WHERE product_id = $1 AND state IN ('PUBLISH_PENDING', 'UPDATE_PENDING')`,
+      [payload.product_id, 'the job could not be queued'],
+    ).catch(() => {});
+  }
 
   // If nothing took the job, the platforms are not going to change, so do not
   // leave the post looking like an update is on its way.
@@ -497,6 +511,21 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
 
   // A rejected post edit is simply dropped: the platforms were never touched,
   // so the live copies stay as they are.
+  const kind = outcome.payload_json?.type;
+  if (kind === 'product_publish' || kind === 'product_update') {
+    const productId = outcome.payload_json.product_id;
+    await tx(async (client) => {
+      await client.query(
+        `UPDATE product_listings SET state = 'LISTED'
+          WHERE product_id = $1 AND state = 'UPDATE_PENDING'`, [productId]);
+      await client.query(
+        `UPDATE product_listings SET state = 'NOT_LISTED'
+          WHERE product_id = $1 AND state = 'PUBLISH_PENDING'`, [productId]);
+    }).catch((err) => console.error('[products] could not roll back:', err.message));
+    res.json({ ok: true, approval_id: outcome.id, product_update: 'discarded' });
+    return;
+  }
+
   const postType = outcome.payload_json?.type;
   if (postType === 'post_update' || postType === 'post_publish') {
     const postId = outcome.payload_json.post_id;
@@ -623,6 +652,183 @@ app.patch('/api/agents/:id/skills/:key', wrap(async (req, res) => {
 
   if (!updated) throw new HttpError(404, 'this agent does not have that skill');
   res.json({ ok: true, skill: updated, agent: await readAgent(agentId) });
+}));
+
+
+// --------------------------------------------------- connected accounts
+// A business may hold several accounts on the same platform. Each is
+// connected, labelled and synced on its own, and its credentials never leave
+// the server.
+
+const ACCOUNT_COLUMNS = `
+  a.id, a.business_id, a.platform, a.label, a.external_id, a.region,
+  a.sync_enabled, a.last_synced_at, a.last_error, a.created_at, a.credentials`;
+
+function publicAccount(row) {
+  const { credentials, ...rest } = row;
+  return { ...rest, credentials: describeCredentials(credentials) };
+}
+
+async function readAccounts(scope, { platform } = {}) {
+  const where = businessClause(scope, { column: 'a.business_id' });
+  const params = [...where.params];
+  let platformSql = '';
+  if (platform && platform !== 'all') {
+    if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
+    params.push(platform);
+    platformSql = ` AND a.platform = $${params.length}`;
+  }
+  const { rows } = await q(
+    `SELECT ${ACCOUNT_COLUMNS} FROM platform_accounts a
+      WHERE ${where.sql}${platformSql}
+      ORDER BY a.platform, a.label`,
+    params,
+  );
+  return rows.map(publicAccount);
+}
+
+async function readAccountRow(id) {
+  assertUuid(id, 'account_id');
+  const { rows } = await q(
+    `SELECT ${ACCOUNT_COLUMNS} FROM platform_accounts a WHERE a.id = $1`, [id]);
+  return rows[0] ?? null;
+}
+
+app.use('/api/accounts', requireUser);
+
+app.get('/api/accounts', wrap(async (req, res) => {
+  res.json({
+    platforms: PLATFORMS,
+    required: REQUIRED_CREDENTIALS,
+    key_configured: credentialsKeyIsSet(),
+    accounts: await readAccounts(scopeFor(req.user, req.query.business_id), {
+      platform: req.query.platform,
+    }),
+  });
+}));
+
+/** Connect a seller account. Owners only — these are keys to a real shop. */
+app.post('/api/accounts', wrap(async (req, res) => {
+  const businessId = assertUuid(req.body?.business_id, 'business_id');
+  requireOwner(req.user, businessId);
+
+  const platform = req.body?.platform;
+  if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
+  const label = String(req.body?.label ?? '').trim();
+  if (label.length < 2) throw new HttpError(400, 'give the account a name you will recognise');
+
+  const credentials = req.body?.credentials ?? {};
+  if (typeof credentials !== 'object' || Array.isArray(credentials)) {
+    throw new HttpError(400, 'credentials must be an object');
+  }
+  const missing = missingCredentials(platform, credentials);
+  if (missing.length) {
+    throw new HttpError(400, `${platform} also needs: ${missing.join(', ')}`);
+  }
+
+  const account = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO platform_accounts
+         (business_id, platform, label, external_id, region, credentials)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING ${ACCOUNT_COLUMNS.replaceAll('a.', '')}`,
+      [businessId, platform, label,
+       req.body?.external_id ?? credentials.shop_id ?? credentials.seller_id ?? null,
+       req.body?.region ?? 'PH',
+       encryptCredentials(credentials)],
+    );
+    await logAction(client, {
+      businessId,
+      action: 'ACCOUNT_CONNECTED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { platform, label },
+    });
+    return rows[0];
+  }).catch((err) => {
+    if (err.code === '23505') {
+      throw new HttpError(409, 'that account is already connected to this business');
+    }
+    throw err;
+  });
+
+  res.status(201).json({ ok: true, account: publicAccount(account) });
+}));
+
+/** Rename it, pause its sync, or replace its credentials. */
+app.patch('/api/accounts/:id', wrap(async (req, res) => {
+  const accountId = assertUuid(req.params.id, 'account_id');
+  const existing = await readAccountRow(accountId);
+  if (!existing) throw new HttpError(404, 'account not found');
+  requireOwner(req.user, existing.business_id);
+
+  const sets = [];
+  const params = [accountId];
+  const push = (sql, value) => { params.push(value); sets.push(`${sql} = $${params.length}`); };
+
+  if (req.body?.label !== undefined) {
+    const label = String(req.body.label).trim();
+    if (label.length < 2) throw new HttpError(400, 'give the account a name you will recognise');
+    push('label', label);
+  }
+  if (req.body?.sync_enabled !== undefined) {
+    if (typeof req.body.sync_enabled !== 'boolean') {
+      throw new HttpError(400, 'sync_enabled must be true or false');
+    }
+    push('sync_enabled', req.body.sync_enabled);
+  }
+  if (req.body?.region !== undefined) push('region', String(req.body.region));
+  if (req.body?.credentials !== undefined) {
+    const merged = { ...(decryptCredentials(existing.credentials) ?? {}), ...req.body.credentials };
+    const missing = missingCredentials(existing.platform, merged);
+    if (missing.length) {
+      throw new HttpError(400, `${existing.platform} also needs: ${missing.join(', ')}`);
+    }
+    push('credentials', encryptCredentials(merged));
+    push('last_error', null);
+  }
+  if (!sets.length) throw new HttpError(400, 'nothing to change');
+
+  const account = await tx(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE platform_accounts SET ${sets.join(', ')} WHERE id = $1
+       RETURNING ${ACCOUNT_COLUMNS.replaceAll('a.', '')}`,
+      params,
+    );
+    await logAction(client, {
+      businessId: existing.business_id,
+      action: req.body?.sync_enabled === false ? 'ACCOUNT_SYNC_PAUSED' : 'ACCOUNT_UPDATED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: {
+        platform: existing.platform,
+        changed: Object.keys(req.body ?? {}).filter((k) => k !== 'credentials')
+          .concat(req.body?.credentials ? ['credentials'] : []),
+      },
+    });
+    return rows[0];
+  });
+
+  res.json({ ok: true, account: publicAccount(account) });
+}));
+
+app.delete('/api/accounts/:id', wrap(async (req, res) => {
+  const accountId = assertUuid(req.params.id, 'account_id');
+  const existing = await readAccountRow(accountId);
+  if (!existing) throw new HttpError(404, 'account not found');
+  requireOwner(req.user, existing.business_id);
+
+  await tx(async (client) => {
+    await client.query('DELETE FROM platform_accounts WHERE id = $1', [accountId]);
+    await logAction(client, {
+      businessId: existing.business_id,
+      action: 'ACCOUNT_DISCONNECTED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { platform: existing.platform, label: existing.label },
+    });
+  });
+  res.json({ ok: true });
 }));
 
 // ------------------------------------------------------------ social posts
@@ -878,6 +1084,373 @@ async function syncTargets(client, postId, platforms) {
     );
   }
 }
+
+
+// ------------------------------------------------------------- products
+// The business's catalogue. A product is written here and listed on whichever
+// connected accounts its owner picks — two Shopee shops and a Lazada account
+// are three separate listings of the same product.
+
+const PRODUCT_COLUMNS = `
+  p.id, p.business_id, p.sku, p.name, p.description, p.price, p.currency,
+  p.stock, p.weight_kg, p.images, p.platform_meta, p.status,
+  p.created_at, p.updated_at,
+  COALESCE((
+    SELECT json_agg(json_build_object(
+             'account_id', l.account_id, 'platform', acc.platform,
+             'label', acc.label, 'external_id', l.external_id,
+             'state', l.state, 'last_synced_at', l.last_synced_at,
+             'last_error', l.last_error) ORDER BY acc.platform, acc.label)
+      FROM product_listings l
+      JOIN platform_accounts acc ON acc.id = l.account_id
+     WHERE l.product_id = p.id
+  ), '[]') AS listings`;
+
+async function readProducts(scope, { platform, accountId, limit = 100 } = {}) {
+  const where = businessClause(scope, { column: 'p.business_id' });
+  const params = [...where.params];
+  let filterSql = '';
+  if (accountId) {
+    assertUuid(accountId, 'account_id');
+    params.push(accountId);
+    filterSql = ` AND EXISTS (SELECT 1 FROM product_listings l2
+                               WHERE l2.product_id = p.id AND l2.account_id = $${params.length})`;
+  } else if (platform && platform !== 'all') {
+    if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
+    params.push(platform);
+    filterSql = ` AND EXISTS (SELECT 1 FROM product_listings l2
+                               JOIN platform_accounts a2 ON a2.id = l2.account_id
+                              WHERE l2.product_id = p.id AND a2.platform = $${params.length})`;
+  }
+  params.push(Math.min(Number(limit) || 100, 200));
+  const { rows } = await q(
+    `SELECT ${PRODUCT_COLUMNS} FROM products p
+      WHERE ${where.sql}${filterSql}
+      ORDER BY p.updated_at DESC
+      LIMIT $${params.length}`,
+    params,
+  );
+  return rows;
+}
+
+/**
+ * Which desk owns a piece of catalogue work. Inventory keeps the stock, so a
+ * listing belongs to that desk; any desk will do if a floor is missing one,
+ * because every approval has to sit somewhere a person can click it.
+ */
+async function deskFor(businessId, department = 'Inventory') {
+  const { rows } = await q(
+    `SELECT id FROM agents
+      WHERE business_id = $1
+      ORDER BY (department = $2) DESC, desk_y, desk_x
+      LIMIT 1`,
+    [businessId, department],
+  );
+  if (!rows[0]) throw new HttpError(409, 'this business has no desks to put the work on');
+  return rows[0].id;
+}
+
+async function readProduct(id) {
+  assertUuid(id, 'product_id');
+  const { rows } = await q(
+    `SELECT ${PRODUCT_COLUMNS} FROM products p WHERE p.id = $1`, [id]);
+  return rows[0] ?? null;
+}
+
+function readProductBody(body, { partial = false } = {}) {
+  const out = {};
+  const need = (name, value) => {
+    if (value === undefined) {
+      if (partial) return;
+      throw new HttpError(400, `${name} is required`);
+    }
+    out[name] = value;
+  };
+  if (body?.sku !== undefined || !partial) {
+    const sku = String(body?.sku ?? '').trim();
+    if (!/^[A-Za-z0-9._-]{2,48}$/.test(sku)) {
+      throw new HttpError(400, 'sku must be 2-48 characters: letters, numbers, . _ -');
+    }
+    out.sku = sku;
+  }
+  if (body?.name !== undefined || !partial) {
+    const name = String(body?.name ?? '').trim();
+    if (name.length < 2) throw new HttpError(400, 'name is required');
+    out.name = name;
+  }
+  if (body?.description !== undefined) out.description = String(body.description);
+  if (body?.price !== undefined || !partial) {
+    const price = Number(body?.price);
+    if (!Number.isFinite(price) || price < 0) throw new HttpError(400, 'price must be a number');
+    out.price = price;
+  }
+  if (body?.currency !== undefined) {
+    const currency = String(body.currency).toUpperCase();
+    if (!/^[A-Z]{3}$/.test(currency)) throw new HttpError(400, 'currency must be a 3-letter code');
+    out.currency = currency;
+  }
+  if (body?.stock !== undefined) {
+    const stock = Number(body.stock);
+    if (!Number.isInteger(stock) || stock < 0) throw new HttpError(400, 'stock must be a whole number');
+    out.stock = stock;
+  }
+  if (body?.weight_kg !== undefined) {
+    const weight = Number(body.weight_kg);
+    // Every marketplace prices shipping off this, so it cannot be zero.
+    if (!Number.isFinite(weight) || weight <= 0) throw new HttpError(400, 'weight_kg must be above zero');
+    out.weight_kg = weight;
+  }
+  if (body?.images !== undefined) {
+    if (!Array.isArray(body.images)) throw new HttpError(400, 'images must be a list of urls');
+    out.images = body.images.map((u) => String(u));
+  }
+  if (body?.platform_meta !== undefined) {
+    if (typeof body.platform_meta !== 'object' || Array.isArray(body.platform_meta)) {
+      throw new HttpError(400, 'platform_meta must be an object keyed by platform');
+    }
+    out.platform_meta = body.platform_meta;
+  }
+  void need;
+  return out;
+}
+
+app.use('/api/products', requireUser);
+
+app.get('/api/products', wrap(async (req, res) => {
+  const scope = scopeFor(req.user, req.query.business_id);
+  res.json({
+    platforms: PLATFORMS,
+    accounts: await readAccounts(scope),
+    products: await readProducts(scope, {
+      platform: req.query.platform,
+      accountId: req.query.account_id,
+      limit: req.query.limit,
+    }),
+  });
+}));
+
+app.get('/api/products/:id', wrap(async (req, res) => {
+  const product = await readProduct(req.params.id);
+  if (!product) throw new HttpError(404, 'product not found');
+  assertInScope(req.user, product.business_id);
+  res.json(product);
+}));
+
+app.post('/api/products', wrap(async (req, res) => {
+  const businessId = assertUuid(req.body?.business_id, 'business_id');
+  assertInScope(req.user, businessId);
+  const fields = readProductBody(req.body);
+
+  const product = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO products
+         (business_id, sku, name, description, price, currency, stock, weight_kg, images, platform_meta)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)
+       RETURNING id`,
+      [businessId, fields.sku, fields.name, fields.description ?? '',
+       fields.price, fields.currency ?? 'PHP', fields.stock ?? 0,
+       fields.weight_kg ?? 0.5, JSON.stringify(fields.images ?? []),
+       JSON.stringify(fields.platform_meta ?? {})],
+    );
+    await logAction(client, {
+      businessId,
+      action: 'PRODUCT_CREATED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { sku: fields.sku },
+    });
+    return rows[0];
+  }).catch((err) => {
+    if (err.code === '23505') throw new HttpError(409, `sku ${fields.sku} already exists here`);
+    throw err;
+  });
+
+  res.status(201).json({ ok: true, product: await readProduct(product.id) });
+}));
+
+/**
+ * Edit a product. Anything already listed somewhere needs approving before the
+ * change reaches a marketplace; the copy here is updated either way, because
+ * this app is where the catalogue lives.
+ */
+app.patch('/api/products/:id', wrap(async (req, res) => {
+  const productId = assertUuid(req.params.id, 'product_id');
+  const existing = await readProduct(productId);
+  if (!existing) throw new HttpError(404, 'product not found');
+  assertInScope(req.user, existing.business_id);
+  const fields = readProductBody(req.body, { partial: true });
+  if (!Object.keys(fields).length) throw new HttpError(400, 'nothing to change');
+
+  const sets = [];
+  const params = [productId];
+  for (const [name, value] of Object.entries(fields)) {
+    params.push(['images', 'platform_meta'].includes(name) ? JSON.stringify(value) : value);
+    sets.push(`${name} = $${params.length}${['images', 'platform_meta'].includes(name) ? '::jsonb' : ''}`);
+  }
+
+  const live = existing.listings.filter((l) => l.state === 'LISTED');
+  const deskId = live.length ? await deskFor(existing.business_id) : null;
+
+  const result = await tx(async (client) => {
+    await client.query(`UPDATE products SET ${sets.join(', ')} WHERE id = $1`, params);
+    if (!live.length) {
+      await logAction(client, {
+        businessId: existing.business_id,
+        action: 'PRODUCT_EDITED',
+        actor: req.user.email,
+        actorUserId: req.user.id,
+        detail: { sku: existing.sku, fields: Object.keys(fields) },
+      });
+      return { approvalId: null };
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO approvals (business_id, agent_id, payload_json)
+       VALUES ($1, $2, $3::jsonb) RETURNING id`,
+      [existing.business_id, deskId, JSON.stringify({
+        type: 'product_update',
+        title: `Update "${existing.name}" on ${live.map((l) => l.label).join(', ')}`,
+        draft: `${fields.name ?? existing.name} — ${fields.currency ?? existing.currency} ${fields.price ?? existing.price}\n\n${fields.description ?? existing.description}`,
+        channel: live[0].platform,
+        product_id: productId,
+        account_ids: live.map((l) => l.account_id),
+        fields: Object.keys(fields),
+        source: { product_id: productId, edited_by: req.user.email },
+      })],
+    );
+    await client.query(
+      `UPDATE product_listings SET state = 'UPDATE_PENDING'
+        WHERE product_id = $1 AND account_id = ANY($2::uuid[]) AND state = 'LISTED'`,
+      [productId, live.map((l) => l.account_id)],
+    );
+    await settleAgent(client, {
+      agentId: deskId,
+      businessId: existing.business_id,
+      status: 'AWAITING_APPROVAL',
+      message: `Catalogue update waiting: ${existing.name}`.slice(0, 500),
+    });
+    await logAction(client, {
+      businessId: existing.business_id,
+      agentId: deskId,
+      approvalId: rows[0].id,
+      action: 'PRODUCT_UPDATE_SUBMITTED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { sku: existing.sku, accounts: live.length },
+    });
+    return { approvalId: rows[0].id };
+  });
+
+  res.json({
+    ok: true,
+    needs_approval: result.approvalId !== null,
+    approval_id: result.approvalId,
+    product: await readProduct(productId),
+  });
+}));
+
+/**
+ * List a product on the accounts its owner picked. Like everything else that
+ * leaves the building, it waits for a human.
+ */
+app.post('/api/products/:id/publish', wrap(async (req, res) => {
+  const productId = assertUuid(req.params.id, 'product_id');
+  const product = await readProduct(productId);
+  if (!product) throw new HttpError(404, 'product not found');
+  assertInScope(req.user, product.business_id);
+
+  const accountIds = req.body?.account_ids;
+  if (!Array.isArray(accountIds) || !accountIds.length) {
+    throw new HttpError(400, 'choose at least one account to list it on');
+  }
+  for (const id of accountIds) assertUuid(id, 'account_id');
+
+  // Only this business's accounts, and only ones that are syncing.
+  const { rows: accounts } = await q(
+    `SELECT id, platform, label, sync_enabled, credentials
+       FROM platform_accounts
+      WHERE id = ANY($1::uuid[]) AND business_id = $2`,
+    [accountIds, product.business_id],
+  );
+  if (accounts.length !== accountIds.length) {
+    throw new HttpError(404, 'one of those accounts does not belong to this business');
+  }
+  const paused = accounts.filter((a) => !a.sync_enabled);
+  if (paused.length) {
+    throw new HttpError(409,
+      `sync is paused for ${paused.map((a) => a.label).join(', ')} — turn it back on first`);
+  }
+  const unconfigured = accounts.filter(
+    (a) => missingCredentials(a.platform, decryptCredentials(a.credentials)).length);
+  if (unconfigured.length) {
+    throw new HttpError(409,
+      `${unconfigured.map((a) => a.label).join(', ')} still needs credentials`);
+  }
+
+  // A marketplace will refuse a listing without its own required bits, so say
+  // so here rather than letting it fail halfway out.
+  const needs = [];
+  for (const account of accounts) {
+    const meta = product.platform_meta?.[account.platform] ?? {};
+    if (['shopee', 'lazada', 'tiktok'].includes(account.platform) && !meta.category_id) {
+      needs.push(`${account.label} needs a ${account.platform} category_id`);
+    }
+  }
+  if (!product.images?.length) needs.push('the product needs at least one image');
+  if (needs.length) throw new HttpError(400, needs.join('; '));
+
+  const agentId = await deskFor(product.business_id);
+
+  const approval = await tx(async (client) => {
+    for (const account of accounts) {
+      await client.query(
+        `INSERT INTO product_listings (product_id, account_id, state)
+         VALUES ($1, $2, 'PUBLISH_PENDING')
+         ON CONFLICT (product_id, account_id) DO UPDATE
+           SET state = CASE WHEN product_listings.state = 'LISTED'
+                            THEN 'UPDATE_PENDING' ELSE 'PUBLISH_PENDING' END,
+               last_error = NULL`,
+        [productId, account.id],
+      );
+    }
+    const { rows } = await client.query(
+      `INSERT INTO approvals (business_id, agent_id, payload_json)
+       VALUES ($1, $2, $3::jsonb) RETURNING id`,
+      [product.business_id, agentId, JSON.stringify({
+        type: 'product_publish',
+        title: `List "${product.name}" on ${accounts.map((a) => a.label).join(', ')}`,
+        draft: `${product.name} — ${product.currency} ${product.price}, ${product.stock} in stock\n\n${product.description}`,
+        channel: accounts[0].platform,
+        product_id: productId,
+        account_ids: accounts.map((a) => a.id),
+        source: { product_id: productId, requested_by: req.user.email },
+      })],
+    );
+    await settleAgent(client, {
+      agentId,
+      businessId: product.business_id,
+      status: 'AWAITING_APPROVAL',
+      message: `Listing waiting: ${product.name}`.slice(0, 500),
+    });
+    await logAction(client, {
+      businessId: product.business_id,
+      agentId,
+      approvalId: rows[0].id,
+      action: 'PRODUCT_PUBLISH_SUBMITTED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { sku: product.sku, accounts: accounts.map((a) => a.label) },
+    });
+    return rows[0];
+  });
+
+  res.json({
+    ok: true,
+    needs_approval: true,
+    approval_id: approval.id,
+    accounts: accounts.map((a) => ({ id: a.id, platform: a.platform, label: a.label })),
+  });
+}));
 
 // ---------------------------------------------------------- platform API
 // For whoever runs this deployment and sells it on. The hard rule here is
@@ -1263,6 +1836,95 @@ app.post('/api/internal/posts', wrap(async (req, res) => {
     return;
   }
   res.status(201).json({ ok: true, post: await readPost(result.postId) });
+}));
+
+/**
+ * The only way credentials ever come back out. n8n calls this with the
+ * internal token to get the keys for one account, and the read is logged, so
+ * there is a record of every time a secret left the database.
+ */
+app.get('/api/internal/accounts/:id/credentials', wrap(async (req, res) => {
+  const accountId = assertUuid(req.params.id, 'account_id');
+  const account = await readAccountRow(accountId);
+  if (!account) throw new HttpError(404, 'account not found');
+
+  const { rows: business } = await q(
+    'SELECT is_active FROM businesses WHERE id = $1', [account.business_id]);
+  if (!business[0]?.is_active) {
+    res.status(423).json({ ok: false, status: 'SUSPENDED',
+      error: 'this business is suspended' });
+    return;
+  }
+  if (!account.sync_enabled) {
+    res.status(423).json({ ok: false, status: 'SYNC_PAUSED',
+      error: `sync is paused for ${account.label}` });
+    return;
+  }
+
+  await tx((client) => logAction(client, {
+    businessId: account.business_id,
+    action: 'ACCOUNT_CREDENTIALS_READ',
+    actor: 'n8n',
+    detail: { platform: account.platform, label: account.label },
+  }));
+
+  res.json({
+    ok: true,
+    account: {
+      id: account.id, platform: account.platform, label: account.label,
+      external_id: account.external_id, region: account.region,
+    },
+    credentials: decryptCredentials(account.credentials),
+  });
+}));
+
+/** n8n reports what happened to one product listing. */
+app.post('/api/internal/products/:id/listings', wrap(async (req, res) => {
+  const productId = assertUuid(req.params.id, 'product_id');
+  const accountId = assertUuid(req.body?.account_id, 'account_id');
+  const state = req.body?.state;
+  if (!['LISTED', 'FAILED', 'NOT_LISTED'].includes(state)) {
+    throw new HttpError(400, 'state must be LISTED, FAILED or NOT_LISTED');
+  }
+  const product = await readProduct(productId);
+  if (!product) throw new HttpError(404, 'product not found');
+
+  await tx(async (client) => {
+    await client.query(
+      `UPDATE product_listings
+          SET state = $3,
+              external_id = COALESCE($4, external_id),
+              last_synced_at = now(),
+              last_error = $5
+        WHERE product_id = $1 AND account_id = $2`,
+      [productId, accountId, state, req.body?.external_id ?? null, req.body?.error ?? null],
+    );
+    await client.query(
+      `UPDATE platform_accounts
+          SET last_synced_at = now(), last_error = $2
+        WHERE id = $1`,
+      [accountId, state === 'FAILED' ? (req.body?.error ?? 'listing failed') : null],
+    );
+    // Listed anywhere at all means the product is out there.
+    await client.query(
+      `UPDATE products SET status = CASE
+           WHEN EXISTS (SELECT 1 FROM product_listings
+                         WHERE product_id = $1 AND state = 'LISTED')
+           THEN 'LISTED' ELSE 'DRAFT' END
+        WHERE id = $1 AND NOT EXISTS (
+          SELECT 1 FROM product_listings
+           WHERE product_id = $1 AND state IN ('PUBLISH_PENDING','UPDATE_PENDING'))`,
+      [productId],
+    );
+    await logAction(client, {
+      businessId: product.business_id,
+      action: state === 'LISTED' ? 'PRODUCT_LISTED' : 'PRODUCT_LISTING_FAILED',
+      actor: 'n8n',
+      detail: { sku: product.sku, state, error: req.body?.error ?? null },
+    });
+  });
+
+  res.json({ ok: true, product: await readProduct(productId) });
 }));
 
 /** n8n reports back what happened to one platform copy. */

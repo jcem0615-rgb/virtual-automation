@@ -9,6 +9,8 @@ import ApprovalModal from './components/ApprovalModal.jsx';
 import Login from './Login.jsx';
 import ControlRoom from './ControlRoom.jsx';
 import PostsPanel from './components/PostsPanel.jsx';
+import ProductsPanel from './components/ProductsPanel.jsx';
+import AccountsPanel from './components/AccountsPanel.jsx';
 
 const STATUS_PILL = {
   IDLE: 'bg-slate-800 text-slate-300',
@@ -274,6 +276,19 @@ export default function App() {
             refreshKey={logs[0]?.id ?? 0}
             onSignedOut={signedOut}
           />
+
+          {/* Products and the shops they go on only make sense inside one
+              business, so they are hidden on the all-businesses view. */}
+          {businessId !== 'all' && (
+            <>
+              <ProductsPanel businessId={businessId} onSignedOut={signedOut} />
+              <AccountsPanel
+                businessId={businessId}
+                isOwner={(user.roles?.[businessId] ?? null) === 'owner'}
+                onSignedOut={signedOut}
+              />
+            </>
+          )}
 
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {agents.map((agent) => (

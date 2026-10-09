@@ -1,0 +1,577 @@
+{
+  "name": "Product Sync — list or update on each connected account",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "product-sync",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e1000000-0000-4000-8000-000000000001",
+      "name": "Approved Listing",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -900,
+        300
+      ],
+      "webhookId": "product-sync",
+      "notes": "Called by the backend once a human approved the listing. Carries the product and which accounts it goes to."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per account the product is being listed on. Each carries the\n// account id, because the credentials are per account, not per platform.\nconst body = $input.first().json.body;\nconst product = body.product;\nconst wanted = body.payload.account_ids ?? [];\n\nreturn product.listings\n  .filter((l) => wanted.includes(l.account_id))\n  .map((l) => ({ json: {\n    product_id: product.id,\n    account_id: l.account_id,\n    platform: l.platform,\n    label: l.label,\n    external_id: l.external_id ?? null,\n    action: l.external_id ? 'update' : 'create',\n    product: {\n      sku: product.sku,\n      name: product.name,\n      description: product.description,\n      price: Number(product.price),\n      currency: product.currency,\n      stock: product.stock,\n      weight_kg: Number(product.weight_kg),\n      images: product.images ?? [],\n      meta: (product.platform_meta ?? {})[l.platform] ?? {},\n    },\n  } }));"
+      },
+      "id": "e1000000-0000-4000-8000-000000000002",
+      "name": "One Item Per Account",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "e1000000-0000-4000-8000-000000000003",
+      "name": "Get Account Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        300
+      ],
+      "notes": "Keys live encrypted in the database, one set per connected shop. This is the only place they come back out, and the backend logs every read. 423 means the business is suspended or that account's sync is paused."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('One Item Per Account').item.json.platform }}",
+                    "rightValue": "shopee"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "shopee"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('One Item Per Account').item.json.platform }}",
+                    "rightValue": "lazada"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "lazada"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('One Item Per Account').item.json.platform }}",
+                    "rightValue": "tiktok"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "tiktok"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "other"
+        }
+      },
+      "id": "e1000000-0000-4000-8000-000000000004",
+      "name": "Which Marketplace",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Shopee: add_item to create, update_item to change one. Both are signed\n//   partner_id + api_path + timestamp + access_token + shop_id\n// with HMAC-SHA256 under the partner key.\nconst crypto = require('crypto');\n\nconst item = $input.item.json;\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst account = $('Get Account Credentials').item.json.account;\nconst host = creds.host || ($env.SHOPEE_HOST || 'https://partner.shopeemobile.com');\n\nconst p = item.product;\nconst create = item.action === 'create';\nconst path = create ? '/api/v2/product/add_item' : '/api/v2/product/update_item';\nconst timestamp = Math.floor(Date.now() / 1000);\nconst base = `${creds.partner_id}${path}${timestamp}${creds.access_token}${creds.shop_id}`;\nconst sign = crypto.createHmac('sha256', creds.partner_key).update(base).digest('hex');\n\n// Shopee prices in the shop's own currency, as a plain number.\nconst common = {\n  item_name: p.name.slice(0, 120),\n  description: p.description.slice(0, 3000),\n  item_sku: p.sku,\n  original_price: p.price,\n  normal_stock: p.stock,\n  weight: p.weight_kg,\n  image: { image_id_list: p.meta.image_ids ?? [], image_url_list: p.images },\n};\n\nconst payload = create\n  ? {\n      ...common,\n      category_id: Number(p.meta.category_id),\n      // Shopee refuses a listing with no channel to ship it on.\n      logistic_info: (p.meta.logistic_ids ?? []).map((id) => ({\n        logistic_id: Number(id), enabled: true,\n      })),\n      attribute_list: p.meta.attributes ?? [],\n      ...(p.meta.brand_id ? { brand: { brand_id: Number(p.meta.brand_id) } } : {}),\n      ...(p.meta.dimension ? { dimension: p.meta.dimension } : {}),\n      condition: p.meta.condition ?? 'NEW',\n      item_status: 'NORMAL',\n    }\n  : { item_id: Number(item.external_id), ...common };\n\nreturn [{ json: {\n  ...item,\n  url: `${host}${path}?partner_id=${creds.partner_id}&timestamp=${timestamp}`\n     + `&access_token=${creds.access_token}&shop_id=${creds.shop_id}&sign=${sign}`,\n  payload,\n  account_label: account.label,\n} }];"
+      },
+      "id": "e1000000-0000-4000-8000-000000000005",
+      "name": "Build Shopee Item",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "e1000000-0000-4000-8000-000000000006",
+      "name": "Shopee add_item / update_item",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const res = $input.item.json;\nconst ok = res.statusCode === 200 && !(res.body && res.body.error);\nreturn [{ json: {\n  product_id: res.product_id,\n  account_id: res.account_id,\n  state: ok ? 'LISTED' : 'FAILED',\n  external_id: ok ? (String(res.body?.response?.item_id ?? $('Build Shopee Item').item.json.external_id ?? '')) : null,\n  error: ok ? null : ('Shopee refused it: ' + String(JSON.stringify(res.body ?? {})).slice(0, 240)),\n} }];"
+      },
+      "id": "e1000000-0000-4000-8000-000000000007",
+      "name": "Read Shopee Listing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Lazada: /product/create and /product/update, both taking an XML payload.\n// The signature is HMAC-SHA256 over the api path followed by every parameter\n// sorted by name and concatenated as name+value, upper-case hex.\nconst crypto = require('crypto');\n\nconst item = $input.item.json;\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst account = $('Get Account Credentials').item.json.account;\nconst region = (account.region || 'PH').toLowerCase();\nconst hostByRegion = {\n  ph: 'https://api.lazada.com.ph/rest', sg: 'https://api.lazada.sg/rest',\n  my: 'https://api.lazada.com.my/rest', th: 'https://api.lazada.co.th/rest',\n  id: 'https://api.lazada.co.id/rest', vn: 'https://api.lazada.vn/rest',\n};\nconst host = creds.host || hostByRegion[region] || hostByRegion.ph;\n\nconst esc = (value) => String(value)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\nconst p = item.product;\nconst create = item.action === 'create';\nconst path = create ? '/product/create' : '/product/update';\n\n// Lazada takes the product as XML, not JSON.\nconst images = (p.images ?? []).map((url) => `<Image>${esc(url)}</Image>`).join('');\nconst attributes = Object.entries(p.meta.attributes ?? {})\n  .map(([name, value]) => `<${name}>${esc(value)}</${name}>`).join('');\nconst payload = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Request><Product>\n  ${create ? '' : `<ItemId>${esc(item.external_id)}</ItemId>`}\n  <PrimaryCategory>${esc(p.meta.category_id ?? '')}</PrimaryCategory>\n  <Images>${images}</Images>\n  <Attributes>\n    <name>${esc(p.name)}</name>\n    <description>${esc(p.description)}</description>\n    <brand>${esc(p.meta.brand ?? 'No Brand')}</brand>\n    ${attributes}\n  </Attributes>\n  <Skus><Sku>\n    <SellerSku>${esc(p.sku)}</SellerSku>\n    <quantity>${p.stock}</quantity>\n    <price>${p.price}</price>\n    <package_weight>${p.weight_kg}</package_weight>\n    <package_length>${esc(p.meta.length_cm ?? 10)}</package_length>\n    <package_width>${esc(p.meta.width_cm ?? 10)}</package_width>\n    <package_height>${esc(p.meta.height_cm ?? 10)}</package_height>\n    <Images>${images}</Images>\n  </Sku></Skus>\n</Product></Request>`;\n\nconst params = {\n  app_key: creds.app_key,\n  access_token: creds.access_token,\n  sign_method: 'sha256',\n  timestamp: String(Date.now()),\n  payload,\n};\nconst base = path + Object.keys(params).sort()\n  .map((name) => name + params[name]).join('');\nconst sign = crypto.createHmac('sha256', creds.app_secret)\n  .update(base).digest('hex').toUpperCase();\n\nconst query = new URLSearchParams({ ...params, sign });\nreturn [{ json: {\n  ...item,\n  url: `${host}${path}`,\n  form: Object.fromEntries(query),\n  account_label: account.label,\n} }];"
+      },
+      "id": "e1000000-0000-4000-8000-000000000008",
+      "name": "Build Lazada Product",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": []
+        },
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.form) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "e1000000-0000-4000-8000-000000000009",
+      "name": "Lazada product/create",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        220
+      ],
+      "notes": "Lazada takes form-encoded parameters, one of which is the XML payload."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const res = $input.item.json;\nconst ok = res.statusCode === 200 && (res.body?.code === '0' || res.body?.code === 0);\nreturn [{ json: {\n  product_id: res.product_id,\n  account_id: res.account_id,\n  state: ok ? 'LISTED' : 'FAILED',\n  external_id: ok ? (String(res.body?.data?.item_id ?? $('Build Lazada Product').item.json.external_id ?? '')) : null,\n  error: ok ? null : ('Lazada refused it: ' + String((res.body?.detail?.[0]?.message ?? res.body?.message ?? JSON.stringify(res.body ?? {}))).slice(0, 240)),\n} }];"
+      },
+      "id": "e1000000-0000-4000-8000-00000000000a",
+      "name": "Read Lazada Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// TikTok Shop: products/202309. Signed over the sorted query parameters\n// wrapped in the app secret, with the body appended.\nconst crypto = require('crypto');\n\nconst item = $input.item.json;\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst account = $('Get Account Credentials').item.json.account;\nconst host = creds.host || 'https://open-api.tiktokglobalshop.com';\n\nconst p = item.product;\nconst create = item.action === 'create';\nconst path = create ? '/product/202309/products' : `/product/202309/products/${item.external_id}`;\n\nconst body = JSON.stringify({\n  title: p.name.slice(0, 255),\n  description: `<p>${p.description}</p>`,\n  category_id: String(p.meta.category_id ?? ''),\n  brand_id: p.meta.brand_id ? String(p.meta.brand_id) : undefined,\n  main_images: (p.images ?? []).map((uri) => ({ uri })),\n  skus: [{\n    seller_sku: p.sku,\n    price: { amount: String(p.price), currency: p.currency },\n    inventory: [{ warehouse_id: String(p.meta.warehouse_id ?? ''), quantity: p.stock }],\n  }],\n  package_weight: { value: String(p.weight_kg), unit: 'KILOGRAM' },\n});\n\nconst params = {\n  app_key: creds.app_key,\n  shop_cipher: creds.shop_cipher,\n  timestamp: String(Math.floor(Date.now() / 1000)),\n  version: '202309',\n};\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst base = creds.app_secret + path + sorted + body + creds.app_secret;\nconst sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\n\nconst query = new URLSearchParams({ ...params, sign });\nreturn [{ json: {\n  ...item,\n  url: `${host}${path}?${query}`,\n  method: create ? 'POST' : 'PUT',\n  payload: JSON.parse(body),\n  access_token: creds.access_token,\n  account_label: account.label,\n} }];"
+      },
+      "id": "e1000000-0000-4000-8000-00000000000b",
+      "name": "Build TikTok Shop Product",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "method": "={{ $json.method }}",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-tts-access-token",
+              "value": "={{ $json.access_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "e1000000-0000-4000-8000-00000000000c",
+      "name": "TikTok Shop products",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const res = $input.item.json;\nconst ok = res.statusCode === 200 && (res.body?.code === 0);\nreturn [{ json: {\n  product_id: res.product_id,\n  account_id: res.account_id,\n  state: ok ? 'LISTED' : 'FAILED',\n  external_id: ok ? (String(res.body?.data?.product_id ?? $('Build TikTok Shop Product').item.json.external_id ?? '')) : null,\n  error: ok ? null : ('TikTok Shop refused it: ' + String((res.body?.message ?? JSON.stringify(res.body ?? {}))).slice(0, 240)),\n} }];"
+      },
+      "id": "e1000000-0000-4000-8000-00000000000d",
+      "name": "Read TikTok Shop Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// A marketplace nobody has wired a sender for yet.\nconst item = $('One Item Per Account').item.json;\nreturn [{ json: {\n  product_id: item.product_id,\n  account_id: item.account_id,\n  state: 'FAILED',\n  error: 'No product sender is wired up for ' + item.platform + ' yet.',\n} }];"
+      },
+      "id": "e1000000-0000-4000-8000-00000000000e",
+      "name": "Unwired Marketplace",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/products/{{ $json.product_id }}/listings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ account_id: $json.account_id, state: $json.state, external_id: $json.external_id, error: $json.error }) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "e1000000-0000-4000-8000-00000000000f",
+      "name": "Report Listing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        300
+      ],
+      "notes": "Each account reports its own result, so the dashboard shows which shops took the listing and which refused it."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true }) }}",
+        "options": {}
+      },
+      "id": "e1000000-0000-4000-8000-000000000010",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        900,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Approved Listing": {
+      "main": [
+        [
+          {
+            "node": "One Item Per Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Item Per Account": {
+      "main": [
+        [
+          {
+            "node": "Get Account Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Account Credentials": {
+      "main": [
+        [
+          {
+            "node": "Which Marketplace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Which Marketplace": {
+      "main": [
+        [
+          {
+            "node": "Build Shopee Item",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Lazada Product",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build TikTok Shop Product",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unwired Marketplace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Shopee Item": {
+      "main": [
+        [
+          {
+            "node": "Shopee add_item / update_item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopee add_item / update_item": {
+      "main": [
+        [
+          {
+            "node": "Read Shopee Listing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Shopee Listing": {
+      "main": [
+        [
+          {
+            "node": "Report Listing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Lazada Product": {
+      "main": [
+        [
+          {
+            "node": "Lazada product/create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lazada product/create": {
+      "main": [
+        [
+          {
+            "node": "Read Lazada Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Lazada Result": {
+      "main": [
+        [
+          {
+            "node": "Report Listing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build TikTok Shop Product": {
+      "main": [
+        [
+          {
+            "node": "TikTok Shop products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TikTok Shop products": {
+      "main": [
+        [
+          {
+            "node": "Read TikTok Shop Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read TikTok Shop Result": {
+      "main": [
+        [
+          {
+            "node": "Report Listing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unwired Marketplace": {
+      "main": [
+        [
+          {
+            "node": "Report Listing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Listing": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "virtual-office-dev"
+  }
+}
