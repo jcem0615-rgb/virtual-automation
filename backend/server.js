@@ -2,6 +2,10 @@
 // fan-out driven entirely by Postgres NOTIFY. No route emits a socket event by
 // hand — it writes the row, the trigger notifies, and the LISTEN handler below
 // broadcasts whatever the database actually committed.
+//
+// Everything under /api (bar /api/health and /api/auth/*) needs a signed-in
+// user, and the businesses that user belongs to are the only scope any query
+// can run in. /api/internal/* is for n8n and carries a shared token instead.
 import http from 'node:http';
 import express from 'express';
 import cors from 'cors';
@@ -10,6 +14,11 @@ import {
   q, tx, listen, closePool,
   HttpError, assertUuid, businessClause,
 } from './db.js';
+import {
+  COOKIE_NAME, readCookie, resolveSession, requireUser, scopeFor,
+  authenticate, createSession, destroySession, setSessionCookie,
+  clearSessionCookie, secretsMatch, purgeExpiredSessions,
+} from './auth.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN ?? 'dev-internal-token';
@@ -17,44 +26,69 @@ const N8N_RETRY_WEBHOOK_URL = process.env.N8N_RETRY_WEBHOOK_URL ?? '';
 const N8N_DISPATCH_WEBHOOK_URL = process.env.N8N_DISPATCH_WEBHOOK_URL ?? '';
 
 const app = express();
-app.use(cors({ origin: process.env.CORS_ORIGIN ?? true }));
+
+// Behind nginx or any TLS terminator, so secure cookies and client IPs work.
+if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY);
+
+// Same-origin by default: in the container nginx serves the dashboard and
+// proxies /api, so no cross-origin access is needed. Set CORS_ORIGIN only if
+// you really do serve the UI from another host.
+const corsOptions = process.env.CORS_ORIGIN
+  ? { origin: process.env.CORS_ORIGIN.split(',').map((s) => s.trim()), credentials: true }
+  : { origin: false };
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
+app.disable('x-powered-by');
 
 const server = http.createServer(app);
-const io = new SocketServer(server, {
-  cors: { origin: process.env.CORS_ORIGIN ?? true },
-});
+const io = new SocketServer(server, { cors: corsOptions });
 
 // ------------------------------------------------------------------ rooms
-// A socket sits in exactly one room: biz:<uuid> or biz:all. Broadcasts go
-// through broadcast() so a tenant's events can never leak into another's.
+// A socket joins one room per business its user belongs to — never a global
+// room, so an event can only reach sockets entitled to that tenant.
 
-const roomFor = (businessId) =>
-  businessId && businessId !== 'all' ? `biz:${businessId}` : 'biz:all';
+const roomFor = (businessId) => `biz:${businessId}`;
 
 function broadcast(businessId, event, payload) {
+  if (!businessId) return;
   io.to(roomFor(businessId)).emit(event, payload);
-  if (businessId && businessId !== 'all') io.to('biz:all').emit(event, payload);
+}
+
+// Socket.io carries the same session cookie as the REST calls.
+io.use((socket, next) => {
+  resolveSession(readCookie(socket.handshake.headers.cookie, COOKIE_NAME))
+    .then((user) => {
+      if (!user) return next(new Error('unauthorized'));
+      socket.data.user = user;
+      next();
+    })
+    .catch(() => next(new Error('unauthorized')));
+});
+
+function joinScope(socket, requested) {
+  let scope;
+  try {
+    scope = scopeFor(socket.data.user, requested);
+  } catch (err) {
+    socket.emit('subscribed', { error: err.message });
+    return;
+  }
+  for (const room of socket.rooms) {
+    if (room !== socket.id) socket.leave(room);
+  }
+  for (const businessId of scope) socket.join(roomFor(businessId));
+  socket.emit('subscribed', { businesses: scope });
 }
 
 io.on('connection', (socket) => {
-  socket.join('biz:all');
-  socket.emit('hello', { ok: true });
+  // Start subscribed to everything this user can see, so events arrive even
+  // before the dashboard sends its first `subscribe`.
+  joinScope(socket, 'all');
+  socket.emit('hello', { user: { email: socket.data.user.email } });
 
   socket.on('subscribe', (raw) => {
     const requested = typeof raw === 'string' ? raw : raw?.businessId;
-    let room;
-    try {
-      room = roomFor(requested === 'all' || !requested ? 'all' : assertUuid(requested, 'business_id'));
-    } catch {
-      socket.emit('subscribed', { error: 'business_id must be a uuid or "all"' });
-      return;
-    }
-    for (const current of socket.rooms) {
-      if (current !== socket.id) socket.leave(current);
-    }
-    socket.join(room);
-    socket.emit('subscribed', { room });
+    joinScope(socket, requested ?? 'all');
   });
 });
 
@@ -69,8 +103,8 @@ const APPROVAL_COLUMNS = `
   a.resolved_by, a.created_at, a.resolved_at,
   ag.name AS agent_name, ag.department AS agent_department`;
 
-async function readAgents(businessId) {
-  const where = businessClause(businessId);
+async function readAgents(scope) {
+  const where = businessClause(scope);
   const { rows } = await q(
     `SELECT ${AGENT_COLUMNS} FROM agents
       WHERE ${where.sql}
@@ -87,8 +121,8 @@ async function readAgent(id) {
   return rows[0] ?? null;
 }
 
-async function readApprovals(businessId, { status, limit = 100 } = {}) {
-  const where = businessClause(businessId, { column: 'a.business_id' });
+async function readApprovals(scope, { status, limit = 100 } = {}) {
+  const where = businessClause(scope, { column: 'a.business_id' });
   const params = [...where.params];
   let statusSql = '';
   if (status && status !== 'ALL') {
@@ -116,12 +150,15 @@ async function readApproval(id) {
   return rows[0] ?? null;
 }
 
-async function readLogs(businessId, limit = 50) {
-  const where = businessClause(businessId, { column: 'l.business_id' });
+const LOG_COLUMNS = `
+  l.id, l.business_id, l.agent_id, l.approval_id, l.action,
+  l.actor, l.detail, l.created_at, ag.name AS agent_name`;
+
+async function readLogs(scope, limit = 50) {
+  const where = businessClause(scope, { column: 'l.business_id' });
   const params = [...where.params, Math.min(Number(limit) || 50, 200)];
   const { rows } = await q(
-    `SELECT l.id, l.business_id, l.agent_id, l.approval_id, l.action,
-            l.actor, l.detail, l.created_at, ag.name AS agent_name
+    `SELECT ${LOG_COLUMNS}
        FROM action_logs l LEFT JOIN agents ag ON ag.id = l.agent_id
       WHERE ${where.sql}
       ORDER BY l.created_at DESC, l.id DESC
@@ -133,21 +170,28 @@ async function readLogs(businessId, limit = 50) {
 
 async function readLog(id) {
   const { rows } = await q(
-    `SELECT l.id, l.business_id, l.agent_id, l.approval_id, l.action,
-            l.actor, l.detail, l.created_at, ag.name AS agent_name
+    `SELECT ${LOG_COLUMNS}
        FROM action_logs l LEFT JOIN agents ag ON ag.id = l.agent_id
       WHERE l.id = $1`, [id]);
   return rows[0] ?? null;
 }
 
+/** Confirm a row belongs to a business the signed-in user may touch. */
+function assertInScope(user, businessId) {
+  if (!(user.businessIds ?? []).includes(businessId)) {
+    throw new HttpError(404, 'not found');
+  }
+}
+
 // ------------------------------------------------------------- write paths
 
-function logAction(client, { businessId, agentId, approvalId, action, actor, detail }) {
+function logAction(client, { businessId, agentId, approvalId, action, actor, actorUserId, detail }) {
   return client.query(
-    `INSERT INTO action_logs (business_id, agent_id, approval_id, action, actor, detail)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+    `INSERT INTO action_logs
+       (business_id, agent_id, approval_id, action, actor, actor_user_id, detail)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
     [businessId, agentId ?? null, approvalId ?? null, action,
-     actor ?? 'system', JSON.stringify(detail ?? {})],
+     actor ?? 'system', actorUserId ?? null, JSON.stringify(detail ?? {})],
   );
 }
 
@@ -186,28 +230,74 @@ async function callWebhook(url, body, label) {
   }
 }
 
-// ------------------------------------------------------------ public REST
-
 const wrap = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
+
+// ----------------------------------------------------------------- auth
 
 app.get('/api/health', wrap(async (_req, res) => {
   const { rows } = await q('SELECT now() AS now');
   res.json({ ok: true, now: rows[0].now, listening: listenerReady });
 }));
 
-app.get('/api/businesses', wrap(async (_req, res) => {
+app.post('/api/auth/login', wrap(async (req, res) => {
+  const { email, password } = req.body ?? {};
+  const user = await authenticate(email, password, { ip: req.ip });
+  const token = await createSession(user.id, {
+    userAgent: req.get('user-agent'),
+    ip: req.ip,
+  });
+  setSessionCookie(res, token);
+  const session = await resolveSession(token);
+  res.json({ ok: true, user: publicUser(session) });
+}));
+
+app.post('/api/auth/logout', wrap(async (req, res) => {
+  await destroySession(readCookie(req.headers.cookie, COOKIE_NAME));
+  clearSessionCookie(res);
+  res.json({ ok: true });
+}));
+
+app.get('/api/auth/me', wrap(async (req, res) => {
+  const user = await resolveSession(readCookie(req.headers.cookie, COOKIE_NAME));
+  if (!user) throw new HttpError(401, 'sign in to continue');
+  res.json({ user: publicUser(user), businesses: await readBusinesses(user) });
+}));
+
+function publicUser(user) {
+  return { id: user.id, email: user.email, displayName: user.displayName };
+}
+
+async function readBusinesses(user) {
+  // The tenant key on this table is `id`, not `business_id`.
+  const where = businessClause(user.businessIds ?? [], { column: 'id' });
   const { rows } = await q(
-    `SELECT id, code, name, timezone, currency FROM businesses ORDER BY name`);
-  res.json(rows);
+    `SELECT id, code, name, timezone, currency FROM businesses
+      WHERE ${where.sql} ORDER BY name`,
+    where.params,
+  );
+  return rows;
+}
+
+// Everything below needs a session.
+app.use('/api/businesses', requireUser);
+app.use('/api/agents', requireUser);
+app.use('/api/approvals', requireUser);
+app.use('/api/action-logs', requireUser);
+app.use('/api/state', requireUser);
+
+// ------------------------------------------------------------ public REST
+
+app.get('/api/businesses', wrap(async (req, res) => {
+  res.json(await readBusinesses(req.user));
 }));
 
 app.get('/api/agents', wrap(async (req, res) => {
-  res.json(await readAgents(req.query.business_id));
+  res.json(await readAgents(scopeFor(req.user, req.query.business_id)));
 }));
 
 app.get('/api/approvals', wrap(async (req, res) => {
-  res.json(await readApprovals(req.query.business_id, {
+  res.json(await readApprovals(scopeFor(req.user, req.query.business_id), {
     status: req.query.status ?? 'PENDING',
     limit: req.query.limit,
   }));
@@ -216,38 +306,41 @@ app.get('/api/approvals', wrap(async (req, res) => {
 app.get('/api/approvals/:id', wrap(async (req, res) => {
   const row = await readApproval(req.params.id);
   if (!row) throw new HttpError(404, 'approval not found');
+  assertInScope(req.user, row.business_id);
   res.json(row);
 }));
 
 app.get('/api/action-logs', wrap(async (req, res) => {
-  res.json(await readLogs(req.query.business_id, req.query.limit));
+  res.json(await readLogs(scopeFor(req.user, req.query.business_id), req.query.limit));
 }));
 
 /** One round trip for the dashboard's initial paint. */
 app.get('/api/state', wrap(async (req, res) => {
-  const businessId = req.query.business_id;
+  const scope = scopeFor(req.user, req.query.business_id);
   const [businesses, agents, approvals, logs] = await Promise.all([
-    q('SELECT id, code, name, timezone, currency FROM businesses ORDER BY name'),
-    readAgents(businessId),
-    readApprovals(businessId, { status: 'PENDING' }),
-    readLogs(businessId, 30),
+    readBusinesses(req.user),
+    readAgents(scope),
+    readApprovals(scope, { status: 'PENDING' }),
+    readLogs(scope, 30),
   ]);
-  res.json({ businesses: businesses.rows, agents, approvals, logs });
+  res.json({ businesses, agents, approvals, logs });
 }));
 
 // APPROVE_TASK — a single guarded UPDATE is the whole race protection: two
 // reviewers (or one double click) both run it, only one sees a row back.
 app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
   const approvalId = assertUuid(req.params.id, 'approval_id');
-  const actor = String(req.body?.reviewer ?? 'dashboard').slice(0, 120);
+  const user = req.user;
 
   const outcome = await tx(async (client) => {
     const { rows } = await client.query(
       `UPDATE approvals
-          SET status = 'APPROVED', resolved_at = now(), resolved_by = $2
+          SET status = 'APPROVED', resolved_at = now(),
+              resolved_by = $2, resolved_by_user_id = $3
         WHERE id = $1 AND status = 'PENDING'
+          AND business_id = ANY($4::uuid[])
         RETURNING id, business_id, agent_id, payload_json`,
-      [approvalId, actor],
+      [approvalId, user.email, user.id, user.businessIds],
     );
     const approval = rows[0];
     if (!approval) return null;
@@ -264,7 +357,8 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
       agentId: approval.agent_id,
       approvalId: approval.id,
       action: 'APPROVE_TASK',
-      actor,
+      actor: user.email,
+      actorUserId: user.id,
       detail: { agent_paused: agent === null, channel: approval.payload_json?.channel ?? null },
     });
     return approval;
@@ -273,6 +367,7 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
   if (!outcome) {
     const current = await readApproval(approvalId);
     if (!current) throw new HttpError(404, 'approval not found');
+    assertInScope(user, current.business_id);
     throw new HttpError(409, `approval already ${current.status.toLowerCase()}`,
       { status: current.status });
   }
@@ -292,17 +387,19 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
 // the draft that was turned down, so the model revises instead of starting over.
 app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
   const approvalId = assertUuid(req.params.id, 'approval_id');
-  const actor = String(req.body?.reviewer ?? 'dashboard').slice(0, 120);
+  const user = req.user;
   const feedback = String(req.body?.feedback ?? '').trim();
   if (!feedback) throw new HttpError(400, 'feedback is required when rejecting');
 
   const outcome = await tx(async (client) => {
     const { rows } = await client.query(
       `UPDATE approvals
-          SET status = 'REJECTED', resolved_at = now(), resolved_by = $2, feedback = $3
+          SET status = 'REJECTED', resolved_at = now(),
+              resolved_by = $2, resolved_by_user_id = $3, feedback = $4
         WHERE id = $1 AND status = 'PENDING'
+          AND business_id = ANY($5::uuid[])
         RETURNING id, business_id, agent_id, payload_json`,
-      [approvalId, actor, feedback],
+      [approvalId, user.email, user.id, feedback, user.businessIds],
     );
     const approval = rows[0];
     if (!approval) return null;
@@ -319,7 +416,8 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
       agentId: approval.agent_id,
       approvalId: approval.id,
       action: 'REJECT_TASK',
-      actor,
+      actor: user.email,
+      actorUserId: user.id,
       detail: { feedback, agent_paused: agent === null },
     });
     return { ...approval, retried: agent !== null };
@@ -328,6 +426,7 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
   if (!outcome) {
     const current = await readApproval(approvalId);
     if (!current) throw new HttpError(404, 'approval not found');
+    assertInScope(user, current.business_id);
     throw new HttpError(409, `approval already ${current.status.toLowerCase()}`,
       { status: current.status });
   }
@@ -363,18 +462,18 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
 app.post('/api/agents/:id/kill', wrap(async (req, res) => {
   const agentId = assertUuid(req.params.id, 'agent_id');
   const resume = req.body?.resume === true;
-  const actor = String(req.body?.reviewer ?? 'dashboard').slice(0, 120);
+  const user = req.user;
 
   const agent = await tx(async (client) => {
     const { rows } = resume
       ? await client.query(
           `UPDATE agents SET status = 'IDLE', last_message = 'Resumed by operator'
-            WHERE id = $1 AND status = 'PAUSED'
-            RETURNING ${AGENT_COLUMNS}`, [agentId])
+            WHERE id = $1 AND status = 'PAUSED' AND business_id = ANY($2::uuid[])
+            RETURNING ${AGENT_COLUMNS}`, [agentId, user.businessIds])
       : await client.query(
           `UPDATE agents SET status = 'PAUSED', last_message = 'Paused by operator'
-            WHERE id = $1
-            RETURNING ${AGENT_COLUMNS}`, [agentId]);
+            WHERE id = $1 AND business_id = ANY($2::uuid[])
+            RETURNING ${AGENT_COLUMNS}`, [agentId, user.businessIds]);
     const row = rows[0];
     if (!row) return null;
 
@@ -382,7 +481,8 @@ app.post('/api/agents/:id/kill', wrap(async (req, res) => {
       businessId: row.business_id,
       agentId: row.id,
       action: 'KILL_SWITCH',
-      actor,
+      actor: user.email,
+      actorUserId: user.id,
       detail: { resume },
     });
     return row;
@@ -391,6 +491,7 @@ app.post('/api/agents/:id/kill', wrap(async (req, res) => {
   if (!agent) {
     const existing = await readAgent(agentId);
     if (!existing) throw new HttpError(404, 'agent not found');
+    assertInScope(user, existing.business_id);
     throw new HttpError(409, resume ? 'agent is not paused' : 'agent could not be paused',
       { status: existing.status });
   }
@@ -401,7 +502,7 @@ app.post('/api/agents/:id/kill', wrap(async (req, res) => {
 // For n8n only. The browser never sends this header.
 
 app.use('/api/internal', (req, _res, next) => {
-  if (req.get('x-internal-token') !== INTERNAL_TOKEN) {
+  if (!secretsMatch(req.get('x-internal-token'), INTERNAL_TOKEN)) {
     return next(new HttpError(401, 'bad or missing x-internal-token'));
   }
   next();
@@ -579,12 +680,19 @@ const stopListening = listen('office_events', async (event) => {
   },
 });
 
+// Lapsed sessions are rejected on sight; this just stops the table growing.
+const sessionSweep = setInterval(() => {
+  purgeExpiredSessions().catch((err) => console.error('[auth] sweep failed:', err.message));
+}, 60 * 60 * 1000);
+sessionSweep.unref();
+
 server.listen(PORT, process.env.BIND_HOST ?? '0.0.0.0', () => {
   console.log(`[api] virtual office backend on :${PORT}`);
 });
 
 async function shutdown(signal) {
   console.log(`[api] ${signal} — shutting down`);
+  clearInterval(sessionSweep);
   io.close();
   server.close();
   await stopListening();

@@ -3,11 +3,10 @@
 // so a change made by n8n or psql lands here the same as one made by a click.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { api } from './api.js';
+import { api, Unauthorized } from './api.js';
 import VirtualOfficeCanvas from './components/VirtualOfficeCanvas.jsx';
 import ApprovalModal from './components/ApprovalModal.jsx';
-
-const REVIEWER = 'dashboard';
+import Login from './Login.jsx';
 
 const STATUS_PILL = {
   IDLE: 'bg-slate-800 text-slate-300',
@@ -22,6 +21,7 @@ const timeOf = (value) =>
   });
 
 export default function App() {
+  const [user, setUser] = useState(undefined);   // undefined = still checking
   const [businessId, setBusinessId] = useState('all');
   const [businesses, setBusinesses] = useState([]);
   const [agents, setAgents] = useState([]);
@@ -35,6 +35,15 @@ export default function App() {
   const businessRef = useRef(businessId);
   businessRef.current = businessId;
 
+  // Any 401 means the session ended — drop to sign-in instead of showing
+  // a dashboard full of stale rows.
+  const signedOut = useCallback(() => {
+    setUser(null);
+    setAgents([]);
+    setApprovals([]);
+    setLogs([]);
+  }, []);
+
   const load = useCallback(async (scopeId) => {
     try {
       const state = await api.state(scopeId);
@@ -46,14 +55,28 @@ export default function App() {
       setLogs(state.logs);
       setError(null);
     } catch (err) {
+      if (err instanceof Unauthorized) return signedOut();
       setError(err.message);
     }
+  }, [signedOut]);
+
+  // Is there already a session? This runs once, before anything else loads.
+  useEffect(() => {
+    api.me()
+      .then((me) => { setUser(me.user); setBusinesses(me.businesses); })
+      .catch(() => setUser(null));
   }, []);
 
-  useEffect(() => { load(businessId); }, [businessId, load]);
+  useEffect(() => { if (user) load(businessId); }, [user, businessId, load]);
 
-  // One socket for the session; the room changes with the filter.
+  // An account with a single business has nothing to filter — scope to it.
   useEffect(() => {
+    if (businesses.length === 1 && businessId === 'all') setBusinessId(businesses[0].id);
+  }, [businesses, businessId]);
+
+  // One socket per signed-in session; the room changes with the filter.
+  useEffect(() => {
+    if (!user) return undefined;
     const socket = io(import.meta.env.VITE_API_BASE ?? '/', {
       transports: ['websocket', 'polling'],
     });
@@ -63,6 +86,11 @@ export default function App() {
       setConnection('live');
       socket.emit('subscribe', { businessId: businessRef.current });
       load(businessRef.current);
+    });
+    socket.on('connect_error', (err) => {
+      // The handshake carries the session cookie; 'unauthorized' means it lapsed.
+      if (err?.message === 'unauthorized') signedOut();
+      else setConnection('offline');
     });
     socket.on('disconnect', () => setConnection('offline'));
     socket.on('realtime:degraded', () => setConnection('degraded'));
@@ -92,7 +120,7 @@ export default function App() {
     });
 
     return () => { socket.close(); socketRef.current = null; };
-  }, [load]);
+  }, [user, load, signedOut]);
 
   useEffect(() => {
     socketRef.current?.emit('subscribe', { businessId });
@@ -114,10 +142,27 @@ export default function App() {
     try {
       await fn();
     } catch (err) {
+      if (err instanceof Unauthorized) { signedOut(); return; }
       setError(err.message);
       throw err;
     }
   };
+
+  const signOut = async () => {
+    await api.logout().catch(() => {});
+    signedOut();
+  };
+
+  if (user === undefined) {
+    return (
+      <div className="flex min-h-full items-center justify-center text-sm text-slate-500">
+        Checking your session…
+      </div>
+    );
+  }
+  if (user === null) {
+    return <Login onSignedIn={(signedIn) => { setBusinessId('all'); setUser(signedIn); }} />;
+  }
 
   return (
     <div className="min-h-full bg-slate-950">
@@ -132,7 +177,7 @@ export default function App() {
               onChange={(e) => { setSelectedAgentId(null); setBusinessId(e.target.value); }}
               className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-100 outline-none focus:border-sky-500"
             >
-              <option value="all">All businesses</option>
+              {businesses.length > 1 && <option value="all">All businesses</option>}
               {businesses.map((b) => (
                 <option key={b.id} value={b.id}>{b.name}</option>
               ))}
@@ -153,6 +198,13 @@ export default function App() {
           <span className="rounded-full bg-amber-950 px-3 py-1 text-xs text-amber-300">
             {approvals.length} awaiting approval
           </span>
+          <span className="hidden text-xs text-slate-500 sm:inline">{user.email}</span>
+          <button
+            onClick={signOut}
+            className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+          >
+            Sign out
+          </button>
         </div>
       </header>
 
@@ -241,9 +293,9 @@ export default function App() {
           agent={selectedAgent}
           approval={selectedApproval}
           onClose={() => setSelectedAgentId(null)}
-          onApprove={(id) => act(() => api.approve(id, REVIEWER))}
-          onReject={(id, feedback) => act(() => api.reject(id, feedback, REVIEWER))}
-          onKill={(agentId, resume) => act(() => api.kill(agentId, resume, REVIEWER))}
+          onApprove={(id) => act(() => api.approve(id))}
+          onReject={(id, feedback) => act(() => api.reject(id, feedback))}
+          onKill={(agentId, resume) => act(() => api.kill(agentId, resume))}
         />
       )}
     </div>

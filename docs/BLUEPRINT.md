@@ -37,7 +37,8 @@ room and know whether anything needs them.
    paused agent cannot be restarted by a retry, an approval, or an n8n run that
    was already in flight.
 3. **One deployment, several businesses, no leakage.** A tenant's rows, events
-   and sockets never reach another tenant.
+   and sockets never reach another tenant — and once there are accounts, the
+   scope comes from who you are, not from what the browser asks for.
 4. **The database is the truth.** The screen reflects what Postgres committed,
    not what a process believes it did. A change made in psql, in n8n, or by a
    second backend instance shows up in the UI the same way a click does.
@@ -61,8 +62,8 @@ lead ─► n8n webhook ─► checkout agent (backend) ─► Ollama draft
 
 ## Deliberately out of scope for v1
 
-- Login. The whole stack binds to 127.0.0.1 instead; auth comes before any
-  network exposure.
+- Self-serve sign-up, password reset email, and role enforcement. Accounts are
+  made by whoever runs the stack, and everyone with an account can approve.
 - Workflows for the other eight departments. Sales proves the pattern; the rest
   are seeded and visible so the room looks right while they get built.
 - Real channel senders. The dispatch workflow routes by channel into

@@ -3,10 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "create-user": "node scripts/create-user.js",
+    "reset-password": "node scripts/reset-password.js"
   },
   "dependencies": {
     "cors": "2.8.5",

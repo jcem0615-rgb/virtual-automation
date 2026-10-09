@@ -54,15 +54,15 @@ export function assertUuid(value, label = 'id') {
 
 /**
  * Tenant isolation, in one place. Every query that returns operational rows
- * composes its WHERE from this. `all` (or an absent id) means "every tenant",
- * which only the dashboard's own aggregate view asks for.
+ * composes its WHERE from this, and it takes the list of businesses the caller
+ * is allowed to see — produced by scopeFor() from the signed-in user, never
+ * from the request. There is deliberately no "everything" branch: an empty
+ * list matches no rows rather than all of them.
  */
-export function businessClause(businessId, { column = 'business_id', index = 1 } = {}) {
-  if (businessId == null || businessId === 'all') {
-    return { sql: 'TRUE', params: [], scoped: false };
-  }
-  assertUuid(businessId, 'business_id');
-  return { sql: `${column} = $${index}`, params: [businessId], scoped: true };
+export function businessClause(businessIds, { column = 'business_id', index = 1 } = {}) {
+  const list = (Array.isArray(businessIds) ? businessIds : [businessIds]).filter(Boolean);
+  for (const id of list) assertUuid(id, 'business_id');
+  return { sql: `${column} = ANY($${index}::uuid[])`, params: [list] };
 }
 
 const CHANNEL_RE = /^[a-z_][a-z0-9_]*$/;

@@ -1,0 +1,36 @@
+# Overlay for a deployment that is reachable from the internet:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Only the frontend is published. Postgres, Ollama, n8n and the API stay on the
+# internal network and are reached through the proxy or an SSH tunnel.
+#
+# Put TLS in front of this (Caddy, nginx, a load balancer or Cloudflare). The
+# session cookie is set Secure, so sign-in will not work over plain http unless
+# you also set COOKIE_SECURE=false — which sends the cookie in the clear.
+services:
+  postgres:
+    ports: !override []
+
+  ollama:
+    ports: !override []
+
+  n8n:
+    # Reach the editor with: ssh -L 5678:localhost:5678 your-host
+    ports: !override ["127.0.0.1:5678:5678"]
+    environment:
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/}
+
+  backend:
+    # No published port: nginx in the frontend container proxies to it.
+    ports: !override []
+    environment:
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      SESSION_DAYS: ${SESSION_DAYS:-7}
+    restart: unless-stopped
+
+  frontend:
+    ports: !override ["${HTTP_PORT:-80}:80"]
+    restart: unless-stopped
