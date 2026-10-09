@@ -9,17 +9,25 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | Path | What it is |
 | --- | --- |
 | `database/schema.sql` | Tables, multi-tenant indexes, NOTIFY triggers. Idempotent. |
-| `database/seed.sql` | Two businesses (`BIZ_ELEC`, `BIZ_ITSOL`), nine agents each. |
+| `database/seed.sql` | Two businesses (`BIZ_ELEC`, `BIZ_ITSOL`), ten agents each. |
 | `backend/server.js` | Express + Socket.io. REST for the UI and n8n, realtime fan-out. |
 | `backend/db.js` | pg pool, `tx()` helper, reconnecting LISTEN client. |
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
 | `backend/secrets.js` | AES-256-GCM for marketplace credentials. Never serves a value. |
+| `backend/oauth.js` | Connecting a shop by authorising on the marketplace. |
+| `backend/commerce.js` | The inbox, orders, payments and payouts. |
+| `backend/live.js` | Live selling: the basket, the monitor, the claims. |
+| `backend/business-lines.js` | The trades a floor can be opened for. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
 | `frontend/src/components/PostsPanel.jsx` | Social posts, per-platform filter, editing. |
 | `frontend/src/components/ProductsPanel.jsx` | Catalogue, and which shops carry each item. |
 | `frontend/src/components/AccountsPanel.jsx` | Connected seller accounts, one per shop. |
+| `frontend/src/components/InboxPanel.jsx` | Buyer conversations. No calls: these platforms have none. |
+| `frontend/src/components/SalesPanel.jsx` | Orders, the money behind them, and the floor's rules. |
+| `frontend/src/components/LivePanel.jsx` | The yellow basket, the monitor, live claims. |
+| `frontend/src/components/NewOfficeDialog.jsx` | Opening another floor for another trade. |
 | `frontend/public/` | PWA manifest, service worker and icons. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
@@ -29,6 +37,9 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `workflows/workflow_approval_dispatch.json` | Approved → the real channel sender. |
 | `workflows/workflow_post_sync.json` | Approved post edit → updates each platform copy. |
 | `workflows/workflow_product_sync.json` | Approved listing → Shopee, Lazada, TikTok Shop. |
+| `workflows/workflow_marketplace_chat.json` | Buyer chat in → CRM draft → approval → reply out. |
+| `workflows/workflow_order_sync.json` | Orders, payouts, and the collector's unpaid round. |
+| `workflows/workflow_live_monitor.json` | Basket pinning, the room's numbers, comment claims. |
 | `docker-compose.yml` | postgres, ollama, n8n, backend, frontend on one network. |
 | `docker-compose.prod.yml` | Overlay for a deployment that is reachable online. |
 
@@ -109,6 +120,15 @@ the realtime path depends on triggers.
   `FAILED` with a readable reason rather than skipping it: Instagram and TikTok cannot
   edit a published post, Shopee cannot create a listing from a caption, and an unset
   credential names the variable. Keep that; a silently skipped platform looks sent.
+- **A shop is connected by authorising, not by pasting keys.** `POST /api/accounts/authorize`
+  stores a single-use `connect_states` row and sends the seller to the marketplace's own
+  page; the redirect lands on `/api/accounts/callback`, which checks the state belongs to
+  the person finishing it, swaps the code for tokens server-side and encrypts them. That
+  redirect must be on the **dashboard's own origin** — it is a top-level navigation and
+  needs the session cookie, so pointing `OAUTH_REDIRECT_BASE` at the API on another host
+  makes every callback arrive signed out. A platform whose app credentials are unset says
+  which variable is missing and the UI falls back to the key form; it never opens a page
+  that could only fail. `POST /api/accounts` is that fallback, not the main path.
 - **Credentials are write-only from the browser.** A business connects several seller
   accounts; each one's keys are encrypted with AES-256-GCM under `CREDENTIALS_KEY` in
   `secrets.js`. `describeCredentials()` is all the dashboard ever sees — which fields are
@@ -147,6 +167,26 @@ the realtime path depends on triggers.
   reviewers cannot both win.
 - **PAUSED always wins.** No side effect (approve, reject, retry) may move a paused agent;
   go through `settleAgent()`.
+- **These marketplaces have no phone line.** Shopee, Lazada and TikTok Shop give a seller
+  chat, a listing and an order feed, and no voice-call API. The inbox says so once at the
+  top, the CRM prompt forbids offering a call, and nothing anywhere offers to ring a buyer.
+- **An order and its money are two different events.** The buyer pays the marketplace,
+  which holds it in escrow and releases the seller's share later minus its fees, so
+  `orders` records what happened and `payments` tracks how far the money has got. A sync
+  that does not mention a figure is not saying it is zero — only what the marketplace
+  actually sent is written, or a cheap poll wipes the fees a fuller one got. Reconciling a
+  payout reports the gap; it never rounds it away.
+- **`payment_rules` decides, not the code.** Whether cash on delivery is allowed and up to
+  what total, when stock really leaves the shelf (`release_stock_on`), and when an unpaid
+  order is chased or given up on are per business and per marketplace. An unpaid order
+  ships only on COD, inside the limit, and the refusal quotes the rule.
+- **A live session is armed once, and that is the gate.** A room moves faster than anyone
+  can click, so `live_arm` is an approval over the exact sentence the desk will send a
+  claimer; inside that session the desk fills in only the blanks. Pinning the basket is its
+  own approval. Pausing withdraws both at once, and `/api/internal/live/*` returns 423 for
+  a session that is not `LIVE` with an `APPROVED` arming — the same shape as a paused agent.
+  TikTok's basket is real; Meta retired Live Shopping in October 2022, so a facebook
+  session says so on its face and reads the comments instead.
 - **Parameterised SQL only.** Validate ids with `assertUuid()`.
 - **Every state transition writes `action_logs`,** naming the person (`actor` is the
   user's email, `actor_user_id` the row) or `n8n` for an automated one.
@@ -167,6 +207,20 @@ the realtime path depends on triggers.
   weight. `products.platform_meta` holds those per platform, and
   `POST /api/products/:id/publish` refuses up front rather than letting the call fail
   halfway out. `REQUIRED_CREDENTIALS` in `secrets.js` does the same for account keys.
+- Each kind of outbound work registers on the approval registry
+  (`registerApprovalType`) with the workflow it dispatches to, what that workflow needs,
+  and how to put its rows back when it is turned down or nothing takes the job. A kind that
+  handles its own rejection also settles its desk, rather than leaving it `WORKING` for a
+  revision that is never coming. Adding a kind means a registration, not another branch in
+  the approve and reject routes.
+- Ten desks: `Sales, Marketing, CRM, Payments, Inventory, Logistics, Production, Admin,
+  HR, Security`. `provision_business_agents()` is the only place the layout is decided, and
+  `business-lines.js` renames them for the trade — the departments never change, so every
+  rule, workflow and filter that keys off one still works.
+- The canvas draws **one** office. Every floor uses the same desk coordinates, so drawing
+  two at once stands one business's staff inside another's; `App.jsx` scopes the agents and
+  passes the business as `floor`, and `FLOOR_THEMES` picks the boards, walls, accent and
+  the one piece of kit that says what the business does.
 - Agent statuses: `IDLE | WORKING | AWAITING_APPROVAL | PAUSED`.
   Approval statuses: `PENDING | APPROVED | REJECTED`. Both are CHECK-constrained; add a
   value in `schema.sql` first.
@@ -202,8 +256,15 @@ the realtime path depends on triggers.
   is no email sending anywhere in the stack.
 - The sign-in throttle lives in one backend process's memory. Run more than one instance
   and you want a shared limiter, or a rate limit at the proxy.
-- Only the Sales workflow exists. Marketing, CRM, Inventory, HR, Admin, Logistics,
-  Security and Production agents are seeded and rendered but have no n8n workflow.
+- Marketing, Inventory, HR, Admin, Logistics, Security and Production agents are seeded
+  and rendered but have no n8n workflow of their own. Sales, CRM and Payments do.
+- Lazada's statement endpoint does not carry its order lines, so a Lazada payout
+  reconciles against nothing and is recorded saying so. Matching it needs
+  `/finance/transaction/detail/get` per order.
+- A live checkout link is whatever `LIVE_CHECKOUT_BASE` points at. TikTok's own cart is
+  the right target there and is not wired; on Facebook, with Live Shopping gone, the seller
+  has to have a checkout of their own.
+- `connect_states` rows are swept only by their expiry index, not by a job.
 - `workflow_approval_dispatch.json` routes by channel into placeholder nodes; the real
   Meta / Shopee / email senders are not wired.
 - Reject always replays through `N8N_RETRY_WEBHOOK_URL` (the sales webhook). Once other

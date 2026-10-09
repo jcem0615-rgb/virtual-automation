@@ -72,6 +72,11 @@ export const api = {
   },
   connectAccount: (body) =>
     request('/api/accounts', { method: 'POST', body: JSON.stringify(body) }),
+  // Start the marketplace's own authorization. Comes back either with the
+  // page to send the seller to, or with the reason it cannot and the fields
+  // to ask for instead.
+  authorizeAccount: (body) =>
+    request('/api/accounts/authorize', { method: 'POST', body: JSON.stringify(body) }),
   updateAccount: (id, body) =>
     request(`/api/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   disconnectAccount: (id) => request(`/api/accounts/${id}`, { method: 'DELETE' }),

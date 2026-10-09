@@ -985,3 +985,29 @@ SELECT provision_business_agents(id) FROM businesses;
 
 -- Orders that existed before stock-taking was recorded.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_taken_at timestamptz;
+
+-- ------------------------------------------------- connecting a shop
+-- Connecting a marketplace account is an authorization the seller gives on
+-- the marketplace's own site: we send them there, they pick the shop and
+-- confirm, and it sends them back with a one-time code we exchange for
+-- tokens. This table holds the handful of seconds in between.
+--
+-- The state value is what ties the code that comes back to the business and
+-- the person who started it. It is single-use and short-lived, because a
+-- leaked one would let somebody else's authorization land on this floor.
+
+CREATE TABLE IF NOT EXISTS connect_states (
+  state       text PRIMARY KEY,
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform    text NOT NULL,
+  label       text NOT NULL DEFAULT '',
+  -- Set when an existing account is being re-authorised rather than a new
+  -- one connected, so a refreshed token lands on the right row.
+  account_id  uuid REFERENCES platform_accounts(id) ON DELETE CASCADE,
+  used_at     timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  expires_at  timestamptz NOT NULL DEFAULT now() + interval '15 minutes'
+);
+
+CREATE INDEX IF NOT EXISTS connect_states_expiry_idx ON connect_states (expires_at);

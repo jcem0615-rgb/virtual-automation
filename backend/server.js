@@ -22,6 +22,9 @@ import {
 import {
   BUSINESS_LINES, BUSINESS_TYPES, businessLine, titlesFor, codeFromName,
 } from './business-lines.js';
+import {
+  authorizable, authorizeUrl, exchangeCode, newState, redirectUri, PLATFORM_NAME,
+} from './oauth.js';
 import { registerCommerce } from './commerce.js';
 import { registerLive } from './live.js';
 import {
@@ -808,7 +811,13 @@ async function readAccountRow(id) {
   return rows[0] ?? null;
 }
 
-app.use('/api/accounts', requireUser);
+// The marketplace's redirect lands on /api/accounts/callback as a top-level
+// navigation with a person looking at it, so that one route resolves the
+// session itself and answers in words rather than with a 401 body.
+app.use('/api/accounts', (req, res, next) => {
+  if (req.path === '/callback') return next();
+  return requireUser(req, res, next);
+});
 
 app.get('/api/accounts', wrap(async (req, res) => {
   res.json({
@@ -821,7 +830,206 @@ app.get('/api/accounts', wrap(async (req, res) => {
   });
 }));
 
-/** Connect a seller account. Owners only — these are keys to a real shop. */
+/**
+ * Start connecting a shop. The seller does not type a key anywhere: they are
+ * sent to the marketplace's own page, they pick the shop there and press
+ * authorize, and it sends them back to /api/accounts/callback with a code we
+ * swap for the tokens.
+ *
+ * Owners only, like every other write that touches a real shop. A platform
+ * this deployment has no app credentials for says exactly which variable is
+ * missing, and the dashboard falls back to the manual form instead.
+ */
+app.post('/api/accounts/authorize', wrap(async (req, res) => {
+  const businessId = assertUuid(req.body?.business_id, 'business_id');
+  assertInScope(req.user, businessId);
+  requireOwner(req.user, businessId);
+
+  const platform = String(req.body?.platform ?? '');
+  if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
+  if (!credentialsKeyIsSet()) {
+    throw new HttpError(500, 'CREDENTIALS_KEY is not set, so a shop cannot be connected');
+  }
+
+  const can = authorizable(platform);
+  if (!can.ok) {
+    // Not an error: it is the honest answer, and the UI offers the manual
+    // form on the back of it rather than opening a page that cannot work.
+    res.json({
+      ok: true, manual: true, platform,
+      platform_name: PLATFORM_NAME[platform] ?? platform,
+      reason: can.reason,
+      fields: REQUIRED_CREDENTIALS[platform] ?? [],
+    });
+    return;
+  }
+
+  // Re-authorising an account that already exists keeps its row, so a token
+  // that has run out is refreshed in place rather than connected twice.
+  let accountId = null;
+  if (req.body?.account_id) {
+    accountId = assertUuid(req.body.account_id, 'account_id');
+    const { rows } = await q(
+      `SELECT 1 FROM platform_accounts WHERE id = $1 AND business_id = $2`,
+      [accountId, businessId]);
+    if (!rows[0]) throw new HttpError(404, 'that account is not on this business');
+  }
+
+  const state = newState();
+  await tx(async (client) => {
+    // One live state per person per platform: starting again abandons the
+    // last attempt rather than leaving a usable code lying around.
+    await client.query(
+      `DELETE FROM connect_states
+        WHERE user_id = $1 AND platform = $2 AND used_at IS NULL`,
+      [req.user.id, platform]);
+    await client.query(
+      `INSERT INTO connect_states (state, business_id, user_id, platform, label, account_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [state, businessId, req.user.id, platform,
+       String(req.body?.label ?? '').slice(0, 120), accountId]);
+    await logAction(client, {
+      businessId,
+      action: 'ACCOUNT_AUTHORIZE_STARTED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { platform, reconnect: Boolean(accountId) },
+    });
+  });
+
+  res.json({
+    ok: true,
+    manual: false,
+    platform,
+    platform_name: PLATFORM_NAME[platform] ?? platform,
+    url: authorizeUrl(platform, state),
+    state,
+  });
+}));
+
+/**
+ * Where the marketplace sends the seller back. This is a top-level GET the
+ * platform navigates to, so it carries the session cookie (SameSite=Lax) and
+ * is checked against the state we stored before we trust a word of it.
+ *
+ * It answers with a small page rather than JSON, because a human is looking
+ * at it: it tells the opener what happened and closes itself.
+ */
+app.get('/api/accounts/callback', wrap(async (req, res) => {
+  const state = String(req.query.state ?? '');
+  req.user = await resolveSession(readCookie(req.headers.cookie, COOKIE_NAME));
+  const finish = (ok, message, detail) => {
+    res.status(ok ? 200 : 400).type('html').send(connectResultPage(ok, message, detail));
+  };
+
+  if (!state) { finish(false, 'That link is missing its state, so it cannot be trusted.'); return; }
+
+  const { rows } = await q(
+    `SELECT * FROM connect_states WHERE state = $1`, [state]);
+  const pending = rows[0];
+  if (!pending) { finish(false, 'That authorization has already been used or has expired.'); return; }
+  if (pending.used_at || new Date(pending.expires_at) < new Date()) {
+    finish(false, 'That authorization has already been used or has expired.');
+    return;
+  }
+  // The person who finishes it has to be the person who started it.
+  if (!req.user || req.user.id !== pending.user_id) {
+    finish(false, 'Sign in as the person who started this connection, then try again.');
+    return;
+  }
+
+  // The seller can simply say no on the platform's page; that is not an error.
+  if (req.query.error || req.query.error_description) {
+    await q(`UPDATE connect_states SET used_at = now() WHERE state = $1`, [state]);
+    finish(false, `${PLATFORM_NAME[pending.platform] ?? pending.platform} did not grant access.`,
+      String(req.query.error_description ?? req.query.error));
+    return;
+  }
+
+  let granted;
+  try {
+    granted = await exchangeCode(pending.platform, req.query);
+  } catch (err) {
+    await q(`UPDATE connect_states SET used_at = now() WHERE state = $1`, [state]);
+    finish(false, 'The marketplace would not complete the connection.', err.message);
+    return;
+  }
+
+  const label = pending.label || granted.label
+    || `${PLATFORM_NAME[pending.platform] ?? pending.platform} shop`;
+  const account = await tx(async (client) => {
+    await client.query(`UPDATE connect_states SET used_at = now() WHERE state = $1`, [state]);
+    const { rows: saved } = await client.query(
+      `INSERT INTO platform_accounts
+         (business_id, platform, label, external_id, credentials, sync_enabled)
+       VALUES ($1, $2, $3, $4, $5, true)
+       ON CONFLICT (business_id, platform, external_id) WHERE external_id IS NOT NULL
+       DO UPDATE SET credentials = EXCLUDED.credentials,
+                     label = EXCLUDED.label,
+                     sync_enabled = true,
+                     last_error = NULL
+       RETURNING id, platform, label, external_id`,
+      [pending.business_id, pending.platform, label.slice(0, 120),
+       granted.externalId || null, encryptCredentials(granted.credentials)]);
+    await logAction(client, {
+      businessId: pending.business_id,
+      action: 'ACCOUNT_CONNECTED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      // The tokens themselves are never logged, only that they arrived.
+      detail: { platform: pending.platform, label, authorized: true },
+    });
+    return saved[0];
+  });
+
+  finish(true, `${label} is connected.`,
+    `Authorized on ${PLATFORM_NAME[pending.platform] ?? pending.platform}. `
+    + 'You can close this window.');
+  void account;
+}));
+
+/**
+ * The page the marketplace's redirect lands on. It exists to tell the window
+ * that opened it what happened and then get out of the way.
+ */
+function connectResultPage(ok, message, detail) {
+  const esc = (text) => String(text ?? '').replace(/[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return `<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${ok ? 'Connected' : 'Not connected'}</title>
+<style>
+  body { margin:0; min-height:100vh; display:grid; place-items:center;
+         background:#0b1017; color:#e6edf6;
+         font-family:ui-sans-serif,system-ui,-apple-system,sans-serif; padding:24px; }
+  .card { max-width:420px; text-align:center; }
+  .mark { width:46px; height:46px; border-radius:999px; margin:0 auto 14px;
+          display:grid; place-items:center; font-size:22px;
+          background:${ok ? '#10381f' : '#3a1414'}; color:${ok ? '#4ade80' : '#fca5a5'}; }
+  h1 { font-size:17px; margin:0 0 6px; }
+  p { margin:0; font-size:13.5px; color:#93a3b8; line-height:1.5; }
+</style>
+<div class="card">
+  <div class="mark">${ok ? '&#10003;' : '!'}</div>
+  <h1>${esc(message)}</h1>
+  <p>${esc(detail ?? '')}</p>
+</div>
+<script>
+  // Tell the dashboard that opened this window, then close.
+  try {
+    window.opener && window.opener.postMessage(
+      { source: 'virtual-office-connect', ok: ${ok ? 'true' : 'false'},
+        message: ${JSON.stringify(message)} }, window.location.origin);
+  } catch (e) { /* opened directly rather than from the dashboard */ }
+  setTimeout(function () { try { window.close(); } catch (e) {} }, ${ok ? 1200 : 4000});
+</script>`;
+}
+
+/**
+ * Connect a seller account by hand. The fallback for a platform this
+ * deployment has no app credentials for — still owners only, because these
+ * are keys to a real shop.
+ */
 app.post('/api/accounts', wrap(async (req, res) => {
   const businessId = assertUuid(req.body?.business_id, 'business_id');
   requireOwner(req.user, businessId);
