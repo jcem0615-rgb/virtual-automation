@@ -556,7 +556,13 @@ export default function VirtualOfficeCanvas({ agents, onSelectAgent }) {
       width: WIDTH,
       height: HEIGHT,
       backgroundColor: '#0f172a',
-      scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_HORIZONTALLY },
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_HORIZONTALLY,
+        // Without this Phaser widens the host div to the game's own width,
+        // which pushes the whole page sideways on a phone.
+        expandParent: false,
+      },
       scene,
     });
     gameRef.current = game;

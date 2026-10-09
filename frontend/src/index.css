@@ -4,3 +4,13 @@
 
 html, body, #root { height: 100%; }
 body { background: #0b1120; color: #e2e8f0; }
+
+/* Installed on a phone the app runs edge to edge, so keep content clear of the
+   notch and the home indicator. */
+body {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* A tap should not select the label underneath it. */
+button { -webkit-tap-highlight-color: transparent; }

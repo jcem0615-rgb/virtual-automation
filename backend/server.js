@@ -689,7 +689,7 @@ app.post('/api/internal/agents/checkout', wrap(async (req, res) => {
 
   const result = await tx(async (client) => {
     const { rows } = await client.query(
-      `SELECT ag.id, ag.business_id, ag.status
+      `SELECT ag.id, ag.business_id, ag.status, b.is_active
          FROM agents ag JOIN businesses b ON b.id = ag.business_id
         WHERE ag.department = $1
           AND ($2::uuid IS NULL OR ag.business_id = $2::uuid)
@@ -699,6 +699,7 @@ app.post('/api/internal/agents/checkout', wrap(async (req, res) => {
     );
     const target = rows[0];
     if (!target) return { notFound: true };
+    if (!target.is_active) return { suspended: true };
     if (target.status === 'PAUSED') return { paused: true, agentId: target.id };
 
     const { rows: updated } = await client.query(
@@ -718,6 +719,11 @@ app.post('/api/internal/agents/checkout', wrap(async (req, res) => {
   });
 
   if (result.notFound) throw new HttpError(404, 'no agent for that business and department');
+  if (result.suspended) {
+    res.status(423).json({ ok: false, status: 'SUSPENDED',
+      error: 'this business is suspended — abort this run' });
+    return;
+  }
   if (result.paused) {
     res.status(423).json({ ok: false, status: 'PAUSED', agent_id: result.agentId,
       error: 'agent is paused — abort this run' });
@@ -737,9 +743,12 @@ app.post('/api/internal/approvals', wrap(async (req, res) => {
 
   const result = await tx(async (client) => {
     const { rows: agents } = await client.query(
-      `SELECT id, business_id, status FROM agents WHERE id = $1 FOR UPDATE`, [agentId]);
+      `SELECT ag.id, ag.business_id, ag.status, b.is_active
+         FROM agents ag JOIN businesses b ON b.id = ag.business_id
+        WHERE ag.id = $1 FOR UPDATE OF ag`, [agentId]);
     const agent = agents[0];
     if (!agent) return { notFound: true };
+    if (!agent.is_active) return { suspended: true };
     if (agent.status === 'PAUSED') return { paused: true };
 
     const { rows } = await client.query(
@@ -768,6 +777,11 @@ app.post('/api/internal/approvals', wrap(async (req, res) => {
   });
 
   if (result.notFound) throw new HttpError(404, 'agent not found');
+  if (result.suspended) {
+    res.status(423).json({ ok: false, status: 'SUSPENDED',
+      error: 'this business is suspended — draft not filed' });
+    return;
+  }
   if (result.paused) {
     res.status(423).json({ ok: false, status: 'PAUSED',
       error: 'agent is paused — draft not filed' });
@@ -776,7 +790,13 @@ app.post('/api/internal/approvals', wrap(async (req, res) => {
   res.status(201).json({ ok: true, approval: result.approval });
 }));
 
-/** Release a desk without filing anything (run finished or failed). */
+/**
+ * Release a desk without filing anything (run finished or failed).
+ *
+ * Deliberately still allowed for a suspended business: this is the call a run
+ * makes on its way out, it can only move an agent to IDLE, and blocking it
+ * would strand a desk in WORKING until the business came back.
+ */
 app.post('/api/internal/agents/:id/release', wrap(async (req, res) => {
   const agentId = assertUuid(req.params.id, 'agent_id');
   const status = req.body?.status ?? 'IDLE';

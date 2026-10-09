@@ -172,6 +172,28 @@ export default function App() {
 
   // A platform operator lands in the control room. They only reach a floor if
   // some business has actually granted them an account on it.
+  // Suspending a business removes it from its own people's scope, so an
+  // account can legitimately end up with nowhere to go.
+  if (businesses.length === 0 && !user.isPlatformOwner) {
+    return (
+      <div className="flex min-h-full items-center justify-center bg-slate-950 p-6">
+        <div className="max-w-sm text-center">
+          <h1 className="text-lg font-semibold text-slate-100">No office is open for you</h1>
+          <p className="mt-2 text-sm text-slate-400">
+            This account is not on an active business right now. Whoever runs your
+            Virtual Office can restore it or grant you access.
+          </p>
+          <button
+            onClick={signOut}
+            className="mt-5 rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (user.isPlatformOwner && view === 'auto') {
     return (
       <ControlRoom
@@ -240,7 +262,7 @@ export default function App() {
       )}
 
       <main className="mx-auto grid max-w-7xl gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-        <section className="space-y-4">
+        <section className="min-w-0 space-y-4">
           <VirtualOfficeCanvas agents={agents} onSelectAgent={(a) => setSelectedAgentId(a.id)} />
 
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">

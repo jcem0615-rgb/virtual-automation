@@ -114,18 +114,19 @@ export async function resolveSession(token) {
     `SELECT s.id AS session_id, s.last_seen_at,
             u.id, u.email, u.display_name, u.is_platform_owner,
             COALESCE(
-              array_agg(ub.business_id ORDER BY ub.business_id)
-                FILTER (WHERE ub.business_id IS NOT NULL),
+              array_agg(b.id ORDER BY b.id) FILTER (WHERE b.id IS NOT NULL),
               '{}'
             ) AS business_ids,
             COALESCE(
-              jsonb_object_agg(ub.business_id, ub.role)
-                FILTER (WHERE ub.business_id IS NOT NULL),
+              jsonb_object_agg(b.id, ub.role) FILTER (WHERE b.id IS NOT NULL),
               '{}'::jsonb
             ) AS roles
        FROM sessions s
        JOIN users u ON u.id = s.user_id
   LEFT JOIN user_businesses ub ON ub.user_id = u.id
+  -- A suspended business drops out of the session's scope entirely, so every
+  -- read, write and socket room derived from it is closed in one place.
+  LEFT JOIN businesses b ON b.id = ub.business_id AND b.is_active
       WHERE s.token_hash = $1 AND s.expires_at > now() AND u.is_active
    GROUP BY s.id, s.last_seen_at, u.id, u.email, u.display_name, u.is_platform_owner`,
     [sha256(token)],

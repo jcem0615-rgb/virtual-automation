@@ -16,6 +16,7 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `backend/scripts/` | `create-user.js`, `reset-password.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
+| `frontend/public/` | PWA manifest, service worker and icons. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
@@ -86,6 +87,13 @@ the realtime path depends on triggers.
   only an `owner` may pause or resume an agent, checked with `requireOwner(user, businessId)`
   before anything is written. The UI hides what a reviewer cannot do, but hiding is not
   the enforcement — the route is.
+- **Suspension closes a business everywhere.** `resolveSession()` only counts memberships
+  in businesses with `is_active`, so a suspended one leaves `businessIds` and every scope
+  derived from it: REST reads, guarded writes, socket rooms. `/api/internal/*` checks it
+  too — checkout and filing a draft return 423 with `status: 'SUSPENDED'`, so an n8n run
+  aborts the same way it does for a paused agent. `release` stays open on purpose: it can
+  only move an agent to IDLE, and blocking it would strand a desk in `WORKING`. The
+  operator's portal still lists suspended businesses, because watching them is its job.
 - **The platform operator sees activity, never content.** `is_platform_owner` unlocks
   `/api/platform/*` only. Those handlers never select `payload_json`, `feedback` or
   `resolved_by`, and an operator holds no `user_businesses` row, so every tenant-scoped
@@ -123,13 +131,20 @@ the realtime path depends on triggers.
   wander the aisles, stop dead). Movement is in `step()`; `routeTo()` keeps people walking
   the aisles between desk blocks rather than over them.
 - Tailwind utility classes only; no separate CSS files beyond `index.css`.
+- The dashboard installs as a PWA. `public/sw.js` must never cache `/api` or `/socket.io`
+  — a stale approval queue is worse than no app. Bump `VERSION` in it when the shell
+  changes. Phaser runs with `expandParent: false`, or it widens its host div and pushes
+  the page sideways on a phone.
 - Currency is PHP; timezone defaults to `Asia/Manila`.
 
 ## Known gaps (good next tasks)
 
-- A suspended business disappears from its own dashboard but its agents keep whatever
-  status they had, and n8n can still check them out through `/api/internal/*`. Gate the
-  internal routes on `businesses.is_active` when that starts to matter.
+- Suspending a business leaves its agents in whatever status they held, so a desk that
+  was `WORKING` still reads that way when it is restored. Settling them on suspend would
+  lose the link to any `AWAITING_APPROVAL` draft, so it is left alone for now.
+- The service worker caches the shell only. The dashboard needs the network, so opening
+  the installed app offline gets the chrome and a failed session check, not a usable
+  queue. Offline review would need the approvals cached, which is a product decision.
 - The Messenger workflow answers one page, chosen by `META_BUSINESS_CODE`. Routing several
   pages to several businesses needs a page-id lookup rather than an env var.
 - No password reset for the user: `scripts/reset-password.js` is the only route, and there

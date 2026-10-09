@@ -101,8 +101,29 @@ any business — so the ordinary tenant-scoped routes return 403 and 404 for it,
 as they would for a stranger. If you need to see inside a business, its owner grants you
 an account like anyone else, and that grant is visible to them in the accounts list.
 
-Suspending a business hides it from its own dashboard without deleting anything;
-restoring brings it straight back.
+Suspending a business closes it completely without deleting anything: it leaves its
+own people's scope, so its floor, drafts and sockets all go dark for them, and n8n is
+refused as well — a checkout or a filed draft comes back 423 and the run aborts. A run
+already in flight can still release its desk, so nothing is left stuck in `WORKING`.
+Restoring brings it all straight back, pending drafts included.
+
+## Installing it on a phone
+
+The dashboard is a PWA, so it installs to the home screen and opens without browser
+chrome. It needs HTTPS, which the deployment instructions above already assume.
+
+- **Android / Chrome** — open the site and take the install prompt, or ⋮ → *Add to Home
+  screen*.
+- **iPhone / Safari** — Share → *Add to Home Screen*. iOS only offers this in Safari.
+
+What you get is the real dashboard, full screen, with the floor scaled to the phone and
+the desk list underneath as the thing you actually tap. Approve, reject and pause all
+work the same.
+
+It is not an offline app. The service worker caches the shell and the build assets so it
+starts fast, but it deliberately never caches `/api` or the socket — a stale approval
+queue would be worse than no app at all. Open it without a connection and you get the
+dashboard chrome and a failed sign-in check.
 
 ## Connecting a Facebook or Instagram page
 
