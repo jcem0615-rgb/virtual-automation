@@ -31,23 +31,114 @@ const SPRITE_COLOURS = {
 const SKIN_TONES = [0xf2d2b6, 0xe0b38c, 0xc68963, 0x9c6240];
 const TROUSERS = 0x334155;
 
-// The fit-out: warm woods, brass and marble, so the rooms read as somewhere
-// you would actually want to sit rather than two grey boxes.
+// The fit-out that every floor shares: the woods, the upholstery, the
+// greenery. What changes between floors is in FLOOR_THEMES below.
 const FINISH = {
-  marble: 0x2a3344,
-  marbleVein: 0x3b465c,
-  walnut: 0x5c3b25,
-  walnutDark: 0x442b1a,
+  walnut: 0x8a5c36,
+  walnutDark: 0x603d22,
   brass: 0xc9a227,
-  brassDim: 0x8a6f1c,
-  leather: 0x6b4536,
-  leatherDark: 0x4e3227,
-  velvet: 0x3b4d6b,
-  rug: 0x2b3850,
-  glass: 0x7fc6e8,
-  plant: 0x2f8f4e,
-  plantDark: 0x236b3b,
+  brassDim: 0x97771b,
+  leather: 0x9a6c4a,
+  leatherDark: 0x6d4a32,
+  sofa: 0x7e8ba3,
+  sofaLight: 0x99a5ba,
+  sofaDark: 0x5a6579,
+  chair: 0x3b4458,
+  chairDark: 0x272e3d,
+  counter: 0xeceff4,
+  counterDark: 0xb9c0cb,
+  counterEdge: 0xf8fafc,
+  cabinet: 0x8a6243,
+  cabinetDark: 0x5f4430,
+  pot: 0xb5724a,
+  potDark: 0x8a5436,
+  plant: 0x3fae5e,
+  plantDark: 0x2c7e45,
 };
+
+/**
+ * What a floor is made of. Same ten desks everywhere, but an electrical
+ * contractor's office is not a salon with different names on the desks, so
+ * the boards, the walls, the accent and the one piece of kit that says what
+ * the business does all come from its line of work.
+ */
+const FLOOR_THEMES = {
+  electrical: {
+    floor: 0xc49a6c, floorAlt: 0xb88d5f, floorSeam: 0x8f6a44,
+    wall: 0xd9d3c7, wallDark: 0xb9b2a4, frame: 0x6f7a86,
+    sky: 0x9fc6de, skyFar: 0x7aa7c4, accent: 0xe08a1e,
+    desk: 0x8a5c36, deskDark: 0x603d22, screen: 0x2563eb,
+    rug: 0xa98257, rugAlt: 0xb08c62, labelInk: '#5b5346',
+    feature: 'workbench',
+  },
+  it_services: {
+    floor: 0xcdb391, floorAlt: 0xc2a784, floorSeam: 0x9c8260,
+    wall: 0xd5d8dd, wallDark: 0xb4b8bf, frame: 0x6b7683,
+    sky: 0xa6cade, skyFar: 0x80acc6, accent: 0x1f8fc4,
+    desk: 0x6f7786, deskDark: 0x4e5564, screen: 0x0ea5e9,
+    rug: 0x9aa7b4, rugAlt: 0xb9bcc0, labelInk: '#4f5864',
+    feature: 'rack',
+  },
+  retail: {
+    floor: 0xdcc39c, floorAlt: 0xd2b78e, floorSeam: 0xa8906a,
+    wall: 0xe4ded2, wallDark: 0xc4bcad, frame: 0x76806a,
+    sky: 0xa9cfe0, skyFar: 0x83b0c8, accent: 0x18a16f,
+    desk: 0x9a6c45, deskDark: 0x6f4d30, screen: 0x10b981,
+    rug: 0xbda07b, rugAlt: 0xc9ae8b, labelInk: '#5c5446',
+    feature: 'shelving',
+  },
+  food: {
+    floor: 0xc08057, floorAlt: 0xb4744a, floorSeam: 0x8a5634,
+    wall: 0xe5d9c9, wallDark: 0xc5b8a5, frame: 0x7d6a56,
+    sky: 0xb0cee0, skyFar: 0x8aadc6, accent: 0xe2672a,
+    desk: 0x8a5c36, deskDark: 0x603d22, screen: 0xf97316,
+    rug: 0xa9774f, rugAlt: 0xb4845c, labelInk: '#5e4b3a',
+    feature: 'prep',
+  },
+  construction: {
+    floor: 0xb7b2a8, floorAlt: 0xaca79c, floorSeam: 0x8b867c,
+    wall: 0xd2cfc8, wallDark: 0xb0ada5, frame: 0x6e7279,
+    sky: 0xa3c4d8, skyFar: 0x7ea3bd, accent: 0xd9a21b,
+    desk: 0x7d6a50, deskDark: 0x594a37, screen: 0xeab308,
+    rug: 0x9e998e, rugAlt: 0xaaa69b, labelInk: '#4f4c45',
+    feature: 'plans',
+  },
+  logistics: {
+    floor: 0xa8adb5, floorAlt: 0x9ca1a9, floorSeam: 0x7c8189,
+    wall: 0xcfd4da, wallDark: 0xadb2b9, frame: 0x68727f,
+    sky: 0x9fc7de, skyFar: 0x79a6c3, accent: 0x1b86c4,
+    desk: 0x5f6a7c, deskDark: 0x434c5b, screen: 0x0284c7,
+    rug: 0x8f959d, rugAlt: 0x9ba1a9, labelInk: '#49505a',
+    feature: 'pallets',
+  },
+  salon: {
+    floor: 0xd9b8ae, floorAlt: 0xcfaba0, floorSeam: 0xa6857c,
+    wall: 0xe6dae0, wallDark: 0xc5b8bf, frame: 0x7e6c78,
+    sky: 0xc2c4e0, skyFar: 0x9b9ec4, accent: 0xd4518c,
+    desk: 0x9a6a6a, deskDark: 0x6e4a4a, screen: 0xec4899,
+    rug: 0xc29a95, rugAlt: 0xcda9a2, labelInk: '#5f4c52',
+    feature: 'mirror',
+  },
+  professional_services: {
+    floor: 0xab8356, floorAlt: 0x9f7749, floorSeam: 0x7a5b35,
+    wall: 0xd8d2c4, wallDark: 0xb7b1a2, frame: 0x6d6657,
+    sky: 0x9ec3dc, skyFar: 0x78a2c1, accent: 0xb08a1e,
+    desk: 0x7a5232, deskDark: 0x563921, screen: 0xca8a04,
+    rug: 0x96724a, rugAlt: 0xa37f55, labelInk: '#564e40',
+    feature: 'library',
+  },
+  general: {
+    floor: 0xc6ab85, floorAlt: 0xbb9f77, floorSeam: 0x957d59,
+    wall: 0xd8d6d0, wallDark: 0xb6b4ad, frame: 0x6f757c,
+    sky: 0xa4c8dd, skyFar: 0x7ea7c3, accent: 0x5b7490,
+    desk: 0x7f6648, deskDark: 0x5a4833, screen: 0x64748b,
+    rug: 0xae9471, rugAlt: 0xb9a07e, labelInk: '#55514a',
+    feature: 'library',
+  },
+};
+
+// The wall runs along the top; everything below it is floor.
+const WALL_H = 118;
 
 const STATUS_STYLE = {
   IDLE: { ring: 0x64748b, label: '', text: '#94a3b8' },
@@ -68,6 +159,13 @@ const AISLE_COLS = [230, 442, 654, 866];
 
 const DEPTH = { floor: 0, furniture: 1, people: 5, labels: 12 };
 
+/** A stable number per business, so a floor looks the same every time. */
+function seedOf(text) {
+  let n = 0;
+  for (const ch of String(text ?? '')) n = (n * 31 + ch.charCodeAt(0)) % 100000;
+  return n;
+}
+
 const rand = (min, max) => min + Math.random() * (max - min);
 const nearest = (values, v) =>
   values.reduce((best, c) => (Math.abs(c - v) < Math.abs(best - v) ? c : best), values[0]);
@@ -79,255 +177,536 @@ class OfficeScene extends Phaser.Scene {
     this.pending = [];         // agents handed over before create() ran
     this.onSelect = null;
     this.spots = [];           // claimable places to stand or sit
+    this.theme = FLOOR_THEMES.general;
+    this.seed = 0;
+    this.floorKey = null;
   }
 
   create() {
     this.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    this.drawFloor();
+    this.room = this.add.container(0, 0);
+    this.drawRoom();
     this.ready = true;
     if (this.pending.length) this.syncAgents(this.pending);
     this.pending = [];
   }
 
+  /**
+   * Which office this is. Changing floors tears the room down and builds the
+   * other one — the people are re-synced right after, so nobody is left
+   * standing on furniture that no longer exists.
+   */
+  setFloor(floor) {
+    const key = `${floor?.id ?? 'none'}:${floor?.business_type ?? 'general'}`;
+    if (key === this.floorKey) return;
+    this.floorKey = key;
+    this.theme = FLOOR_THEMES[floor?.business_type] ?? FLOOR_THEMES.general;
+    this.seed = seedOf(floor?.id ?? floor?.business_type ?? 'office');
+    this.floorName = floor?.name ?? 'VIRTUAL OFFICE';
+    if (!this.ready) return;
+    this.drawRoom();
+    // Every spot the old room owned is gone, so anyone holding one is sent
+    // back to their desk and picks a new place from the new room.
+    for (const person of this.people.values()) {
+      person.claim = null;
+      this.applyStatus(person, person.data);
+    }
+  }
+
+  /** Build (or rebuild) the room, leaving the people alone. */
+  drawRoom() {
+    for (const child of this.room.list.slice()) child.destroy();
+    this.spots = [];
+    this.building = [];
+    this.drawFloor();
+    for (const object of this.building) this.room.add(object);
+    this.building = null;
+  }
+
+  /** Every room object goes through here so a rebuild can clear it. */
+  keep(object) {
+    if (this.building) this.building.push(object);
+    return object;
+  }
+
   // ------------------------------------------------------------ the room
+  //
+  // Drawn as a room seen from a little above rather than a flat plan: every
+  // solid thing gets a top face, a darker front face below it and a soft
+  // shadow, with the light coming from the windows along the top. It is not a
+  // 3D engine — the people still walk a flat grid — but it reads as a place.
+  //
+  // What the room is made of comes from the business's line of work, so a
+  // retail floor and an electrical contractor's floor are not the same office
+  // with different names on the desks. `theme` is picked in setFloor().
+
   drawFloor() {
-    const g = this.add.graphics().setDepth(DEPTH.floor);
-    g.fillStyle(0x0f172a, 1).fillRect(0, 0, WIDTH, HEIGHT);
+    const t = this.theme;
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.floor);
 
-    g.lineStyle(1, 0x1a2538, 1);
-    for (let x = 0; x <= WIDTH; x += 40) g.lineBetween(x, 0, x, HEIGHT);
-    for (let y = 0; y <= HEIGHT; y += 40) g.lineBetween(0, y, WIDTH, y);
+    // Floorboards, running the length of the room, with a seam every plank
+    // and a few boards knocked slightly darker so it is not a flat fill.
+    g.fillStyle(t.floor, 1).fillRect(0, 0, WIDTH, HEIGHT);
+    // A warm pool of daylight under the windows, falling off toward the back
+    // of the room, so the floor is not one flat colour.
+    for (let i = 0; i < 14; i += 1) {
+      g.fillStyle(0xffffff, 0.035 - i * 0.0024).fillRect(0, WALL_H + i * 12, WIDTH, 12);
+    }
+    for (let y = WALL_H; y < HEIGHT; y += 26) {
+      g.fillStyle(t.floorAlt, this.noise(y) > 0.62 ? 0.5 : 0.22).fillRect(0, y, WIDTH, 26);
+      g.fillStyle(t.floorSeam, 0.5).fillRect(0, y + 25, WIDTH, 1);
+    }
+    // Short seams across, so the boards look laid rather than striped.
+    g.fillStyle(t.floorSeam, 0.35);
+    for (let y = WALL_H; y < HEIGHT; y += 26) {
+      for (let x = (y / 26) % 2 ? 90 : 210; x < WIDTH; x += 240) g.fillRect(x, y, 1.5, 26);
+    }
 
-    g.lineStyle(3, 0x334155, 1).strokeRect(18, 58, WIDTH - 36, HEIGHT - 76);
-    g.fillStyle(0x1e293b, 1).fillRoundedRect(18, 14, WIDTH - 36, 34, 8);
-    this.add.text(34, 22, 'VIRTUAL OFFICE — FLOOR 1', {
-      fontFamily: 'ui-monospace, monospace', fontSize: '14px', color: '#64748b',
-    }).setDepth(DEPTH.labels);
-
-    this.drawLobby(40, 74, 470, 132);
-    this.drawPantry(590, 74, 470, 132);
-    this.drawWaterCooler(230, 450);
-    this.drawPrinter(866, 450);
-  }
-
-  zone(x, y, w, h, title, accent = 0x24334f) {
-    const g = this.add.graphics().setDepth(DEPTH.floor);
-    // Panelled wall, warm floor, brass trim.
-    g.fillStyle(0x16202f, 1).fillRoundedRect(x, y, w, h, 12);
-    g.fillStyle(0x1b2738, 1).fillRoundedRect(x + 3, y + 3, w - 6, h - 6, 10);
-    g.lineStyle(1, accent, 0.45).strokeRoundedRect(x, y, w, h, 12);
-    g.lineStyle(1, 0x223049, 0.8);
-    for (let i = 1; i < 4; i += 1) g.lineBetween(x + (w / 4) * i, y + 4, x + (w / 4) * i, y + 16);
-    g.lineStyle(1, 0, 0);
-    this.add.text(x + 14, y + 8, title, {
-      fontFamily: 'ui-monospace, monospace', fontSize: '10px',
-      color: '#b99a34', letterSpacing: 2,
-    }).setDepth(DEPTH.labels);
-    g.fillStyle(accent, 0.5).fillRect(x + 14, y + 21, 26, 1);
-    return this.add.graphics().setDepth(DEPTH.furniture);
-  }
-
-  /** A rug, so a room reads as a room and not a rectangle. */
-  rug(g, x, y, w, h) {
-    g.fillStyle(FINISH.rug, 1).fillRoundedRect(x, y, w, h, 10);
-    g.lineStyle(2, FINISH.brassDim, 0.5).strokeRoundedRect(x + 5, y + 5, w - 10, h - 10, 7);
-    g.lineStyle(1, 0, 0);
-  }
-
-  /** A potted plant, drawn at a size that suits where it stands. */
-  plant(g, x, y, scale = 1) {
-    g.fillStyle(FINISH.walnutDark, 1)
-      .fillRoundedRect(x - 9 * scale, y, 18 * scale, 15 * scale, 3);
-    g.fillStyle(FINISH.walnut, 1)
-      .fillRoundedRect(x - 10 * scale, y - 2 * scale, 20 * scale, 5 * scale, 2);
-    g.fillStyle(FINISH.plantDark, 1);
-    g.fillCircle(x - 7 * scale, y - 6 * scale, 8 * scale);
-    g.fillCircle(x + 7 * scale, y - 5 * scale, 7 * scale);
-    g.fillStyle(FINISH.plant, 1);
-    g.fillCircle(x, y - 14 * scale, 10 * scale);
-    g.fillCircle(x - 9 * scale, y - 11 * scale, 6 * scale);
-    g.fillCircle(x + 9 * scale, y - 10 * scale, 5 * scale);
+    this.drawWalls(g, t);
+    this.drawLounge(40, WALL_H + 8, 430, 150);
+    this.drawPantry(WIDTH - 420, WALL_H + 8, 380, 150);
+    this.drawMeetingTable(WIDTH / 2, 452);
+    this.drawFeature(t);
+    this.drawGreenery(t);
   }
 
   /**
-   * The lobby: a marble reception desk with a brass rail, a leather sofa and
-   * armchair round a rug, a coffee table, and greenery in the corners.
+   * A back wall with a glass curtain wall in it. The glass is where the room
+   * gets its light, so everything below is lit from the top.
    */
-  drawLobby(x, y, w, h) {
-    const g = this.zone(x, y, w, h, 'LOBBY', FINISH.brass);
-    const midY = y + h / 2 + 10;
+  drawWalls(g, t) {
+    // The wall itself, with a shadow where it meets the floor.
+    g.fillStyle(t.wall, 1).fillRect(0, 0, WIDTH, WALL_H);
+    g.fillStyle(t.wallDark, 1).fillRect(0, WALL_H - 10, WIDTH, 10);
+    g.fillStyle(0x000000, 0.22).fillRect(0, WALL_H, WIDTH, 14);
 
-    // Rug under the seating.
-    this.rug(g, x + 18, midY - 40, 190, 76);
+    // Glazing: two runs of windows with mullions and a hint of outside.
+    const bays = [[64, 400], [WIDTH - 470, 410]];
+    for (const [x, w] of bays) {
+      g.fillStyle(t.frame, 1).fillRoundedRect(x - 6, 14, w + 12, WALL_H - 36, 4);
+      g.fillStyle(t.sky, 1).fillRect(x, 20, w, WALL_H - 48);
+      // Daylight falling down the glass.
+      g.fillStyle(0xffffff, 0.1).fillRect(x, 20, w, 16);
+      g.fillStyle(t.skyFar, 0.55).fillRect(x, WALL_H - 46, w, 18);
+      g.fillStyle(t.frame, 1);
+      for (let m = 1; m * 100 < w; m += 1) g.fillRect(x + m * 100 - 2, 20, 4, WALL_H - 48);
+      g.fillRect(x, 20 + (WALL_H - 48) / 2 - 2, w, 4);
+    }
 
-    // Reception counter: marble top, walnut body, brass foot rail.
-    const deskX = x + w - 96;
-    g.fillStyle(FINISH.walnutDark, 1).fillRoundedRect(deskX, y + 30, 80, 70, 6);
-    g.fillStyle(FINISH.walnut, 1).fillRoundedRect(deskX + 4, y + 34, 72, 58, 4);
-    g.fillStyle(FINISH.marble, 1).fillRoundedRect(deskX - 4, y + 24, 88, 12, 4);
-    g.fillStyle(FINISH.marbleVein, 1).fillRect(deskX + 10, y + 28, 36, 2);
-    g.fillStyle(FINISH.brass, 0.85).fillRoundedRect(deskX + 6, y + 94, 68, 4, 2);
-    // A monitor and a bell on the counter.
-    g.fillStyle(0x0b1220, 1).fillRoundedRect(deskX + 14, y + 8, 28, 16, 2);
-    g.fillStyle(FINISH.brass, 0.9).fillCircle(deskX + 60, y + 18, 5);
+    // A framed picture and a clock on the solid piece between the bays.
+    const midX = (bays[0][0] + bays[0][1] + bays[1][0]) / 2;
+    g.fillStyle(t.frame, 1).fillRoundedRect(midX - 34, 26, 68, 46, 3);
+    g.fillStyle(t.accent, 0.5).fillRect(midX - 29, 31, 58, 36);
+    g.fillStyle(t.wallDark, 1).fillCircle(midX, 92, 13);
+    g.fillStyle(0xf8fafc, 1).fillCircle(midX, 92, 10);
+    g.fillStyle(t.wallDark, 1).fillRect(midX - 1, 85, 2, 8).fillRect(midX, 91, 7, 2);
+  }
 
-    // Three-seat leather sofa with piping.
-    const sofaX = x + 68;
-    g.fillStyle(FINISH.leatherDark, 1).fillRoundedRect(sofaX - 62, midY - 36, 124, 20, 7);
-    g.fillStyle(FINISH.leather, 1).fillRoundedRect(sofaX - 58, midY - 20, 116, 24, 7);
-    g.lineStyle(1, FINISH.brassDim, 0.6);
-    g.strokeRoundedRect(sofaX - 58, midY - 20, 116, 24, 7);
-    g.lineBetween(sofaX - 20, midY - 18, sofaX - 20, midY + 2);
-    g.lineBetween(sofaX + 20, midY - 18, sofaX + 20, midY + 2);
-    g.lineStyle(1, 0, 0);
-    g.fillStyle(FINISH.leatherDark, 1).fillRoundedRect(sofaX - 70, midY - 28, 12, 30, 5);
-    g.fillStyle(FINISH.leatherDark, 1).fillRoundedRect(sofaX + 58, midY - 28, 12, 30, 5);
+  /** Noise with a stable value per coordinate, so a redraw looks the same. */
+  noise(n) {
+    const v = Math.sin((n + this.seed) * 12.9898) * 43758.5453;
+    return v - Math.floor(v);
+  }
 
-    // Armchair facing it.
-    g.fillStyle(FINISH.leatherDark, 1).fillRoundedRect(sofaX + 112, midY - 30, 34, 16, 6);
-    g.fillStyle(FINISH.leather, 1).fillRoundedRect(sofaX + 114, midY - 16, 30, 20, 6);
+  /** A box with a top face and a front face: the whole 2.5D trick. */
+  box(g, x, y, w, d, h, top, front, radius = 3) {
+    g.fillStyle(0x000000, 0.2).fillRoundedRect(x + 3, y + d - 2, w, h + 4, radius);
+    g.fillStyle(front, 1).fillRoundedRect(x, y + d - h / 2, w, h, radius);
+    g.fillStyle(top, 1).fillRoundedRect(x, y, w, d, radius);
+  }
 
-    // Marble coffee table with a tray.
-    g.fillStyle(FINISH.marble, 1).fillRoundedRect(sofaX + 2, midY + 10, 64, 20, 5);
-    g.fillStyle(FINISH.marbleVein, 1).fillRect(sofaX + 12, midY + 16, 24, 2);
-    g.fillStyle(FINISH.brass, 0.8).fillRoundedRect(sofaX + 38, midY + 13, 18, 7, 2);
+  /**
+   * A rug. Woven, a shade off the boards rather than a block of colour, with
+   * a border and a fringe — otherwise it reads as a hole in the floor.
+   */
+  rug(g, x, y, w, h, colour, edge) {
+    g.fillStyle(0x000000, 0.08).fillRoundedRect(x + 3, y + 3, w, h, 6);
+    g.fillStyle(colour, 1).fillRoundedRect(x, y, w, h, 6);
+    g.fillStyle(0xffffff, 0.05);
+    for (let i = y + 6; i < y + h - 4; i += 7) g.fillRect(x + 4, i, w - 8, 2);
+    g.lineStyle(2, edge, 0.45).strokeRoundedRect(x + 7, y + 7, w - 14, h - 14, 4);
+    g.lineStyle(0, 0, 0);
+    g.fillStyle(colour, 1);
+    for (let i = x + 6; i < x + w - 4; i += 8) {
+      g.fillRect(i, y - 3, 3, 3).fillRect(i, y + h, 3, 3);
+    }
+  }
 
-    // Greenery and a framed picture on the back wall.
-    this.plant(g, x + 22, y + 44, 0.9);
-    this.plant(g, x + w - 24, y + h - 22, 0.75);
-    g.fillStyle(FINISH.walnut, 1).fillRoundedRect(x + 118, y + 14, 46, 30, 3);
-    g.fillStyle(FINISH.velvet, 1).fillRect(x + 122, y + 18, 38, 22);
+  /**
+   * A plant. Three canopy blobs over a pot, sized to where it stands — the
+   * big ones are trees in the corners, the small ones sit on a counter.
+   */
+  plant(g, x, y, scale = 1, dark = false) {
+    const leaf = dark ? FINISH.plantDark : FINISH.plant;
+    g.fillStyle(0x000000, 0.18).fillEllipse(x + 2, y + 9 * scale, 26 * scale, 9 * scale);
+    g.fillStyle(FINISH.potDark, 1).fillRoundedRect(x - 10 * scale, y - 2 * scale, 20 * scale, 16 * scale, 3);
+    g.fillStyle(FINISH.pot, 1).fillRoundedRect(x - 11 * scale, y - 4 * scale, 22 * scale, 7 * scale, 2);
+    g.fillStyle(FINISH.plantDark, 1);
+    g.fillCircle(x - 8 * scale, y - 10 * scale, 9 * scale);
+    g.fillCircle(x + 8 * scale, y - 9 * scale, 8 * scale);
+    g.fillStyle(leaf, 1);
+    g.fillCircle(x, y - 19 * scale, 11 * scale);
+    g.fillCircle(x - 10 * scale, y - 15 * scale, 7 * scale);
+    g.fillCircle(x + 10 * scale, y - 14 * scale, 6 * scale);
+    g.fillStyle(0xffffff, 0.08).fillCircle(x - 3 * scale, y - 23 * scale, 5 * scale);
+  }
+
+  /**
+   * The lounge: a sofa and an armchair round a low table on a rug, with a
+   * sideboard and a screen on the wall behind. Where people go when there is
+   * nothing on.
+   *
+   * Drawn back to front — rug, table, armchair, then the sofa nearest the
+   * viewer — because this is one graphics object and later is on top.
+   */
+  drawLounge(x, y, w, h) {
+    const t = this.theme;
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
+    this.zoneLabel(x + w - 62, y + 2, 'LOUNGE');
+
+    // Sideboard along the wall, with a screen over it.
+    this.box(g, x + 10, y - 4, 132, 20, 13, FINISH.walnut, FINISH.walnutDark, 3);
+    g.fillStyle(0x1f2937, 1).fillRoundedRect(x + 36, y - 28, 84, 22, 2);
+    g.fillStyle(t.accent, 0.35).fillRoundedRect(x + 40, y - 24, 76, 14, 2);
+    g.fillStyle(FINISH.brass, 0.85).fillCircle(x + 22, y, 4);
+    g.fillStyle(0xf1f5f9, 0.8).fillRoundedRect(x + 128, y - 6, 10, 14, 2);
+
+    this.rug(g, x + 22, y + 28, 272, 108, t.rug, t.accent);
+
+    // Coffee table, with something on it.
+    const tx = x + 142;
+    const ty = y + 70;
+    g.fillStyle(0x000000, 0.16).fillEllipse(tx + 3, ty + 7, 76, 28);
+    g.fillStyle(FINISH.walnutDark, 1).fillEllipse(tx, ty + 5, 72, 26);
+    g.fillStyle(FINISH.walnut, 1).fillEllipse(tx, ty, 72, 26);
+    g.fillStyle(0xffffff, 0.06).fillEllipse(tx - 14, ty - 5, 30, 10);
+    g.fillStyle(0xf1f5f9, 0.85).fillRoundedRect(tx - 24, ty - 6, 18, 11, 2);
+    g.fillStyle(t.accent, 0.85).fillCircle(tx + 16, ty, 5);
+
+    // Armchair at the end of the rug, turned toward the table.
+    const ax = x + 232;
+    const ay = y + 44;
+    g.fillStyle(0x000000, 0.14).fillRoundedRect(ax + 3, ay + 30, 48, 20, 8);
+    g.fillStyle(FINISH.sofaDark, 1).fillRoundedRect(ax, ay, 48, 22, 7);
+    g.fillStyle(FINISH.sofa, 1).fillRoundedRect(ax + 3, ay + 4, 42, 14, 6);
+    g.fillStyle(FINISH.sofaDark, 1)
+      .fillRoundedRect(ax, ay + 16, 13, 34, 6)
+      .fillRoundedRect(ax + 35, ay + 16, 13, 34, 6);
+    g.fillStyle(FINISH.sofaLight, 1).fillRoundedRect(ax + 15, ay + 20, 18, 28, 5);
+
+    // The sofa, nearest the viewer: a back, two arms and cushions between
+    // them. A slab with a front face reads as a counter, not a seat.
+    const sx = x + 34;
+    const sy = y + 92;
+    const sw = 184;
+    g.fillStyle(0x000000, 0.16).fillRoundedRect(sx + 4, sy + 34, sw, 22, 8);
+    g.fillStyle(FINISH.sofaDark, 1).fillRoundedRect(sx, sy, sw, 24, 7);
+    g.fillStyle(FINISH.sofa, 1).fillRoundedRect(sx + 3, sy + 4, sw - 6, 15, 6);
+    g.fillStyle(FINISH.sofaDark, 1)
+      .fillRoundedRect(sx, sy + 18, 15, 36, 7)
+      .fillRoundedRect(sx + sw - 15, sy + 18, 15, 36, 7);
+    for (let i = 0; i < 3; i += 1) {
+      g.fillStyle(FINISH.sofaLight, 1)
+        .fillRoundedRect(sx + 18 + i * 50, sy + 22, 46, 28, 6);
+    }
+    g.fillStyle(t.accent, 0.6).fillRoundedRect(sx + 22, sy + 26, 20, 20, 5);
+    g.fillStyle(t.accent, 0.35).fillRoundedRect(sx + 122, sy + 26, 20, 20, 5);
+
+    this.plant(g, x + w - 34, y + h - 18, 1.15);
+    this.plant(g, x + 304, y + 44, 0.75, true);
 
     this.spots.push(
-      { x: sofaX - 30, y: midY + 4, sit: true, takenBy: null },
-      { x: sofaX + 30, y: midY + 4, sit: true, takenBy: null },
-      { x: sofaX + 129, y: midY + 6, sit: true, takenBy: null },
-      { x: deskX - 28, y: y + h - 18, sit: false, takenBy: null },
+      { x: sx + 40, y: sy + 36, sit: true, takenBy: null },
+      { x: sx + 90, y: sy + 36, sit: true, takenBy: null },
+      { x: sx + 140, y: sy + 36, sit: true, takenBy: null },
+      { x: ax + 24, y: ay + 34, sit: true, takenBy: null },
+      { x: x + w - 72, y: y + h - 14, sit: false, takenBy: null },
     );
   }
 
   /**
-   * The pantry: a marble counter with a brass tap and espresso machine, a
-   * tall fridge, and a communal table with stools.
+   * The pantry: a run of counter with an espresso machine and a sink, a tall
+   * fridge, and a high table with stools.
    */
   drawPantry(x, y, w, h) {
-    const g = this.zone(x, y, w, h, 'PANTRY', FINISH.brass);
-    const midY = y + h / 2 + 14;
+    const t = this.theme;
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
+    this.zoneLabel(x + 12, y + 4, 'PANTRY');
 
-    // Run of cabinets under a marble worktop.
-    const counterW = Math.min(176, w - 120);
-    g.fillStyle(FINISH.walnutDark, 1).fillRoundedRect(x + 16, y + 30, counterW, 34, 4);
-    g.lineStyle(1, FINISH.walnut, 0.9);
-    for (let i = 1; i < 3; i += 1) {
-      g.lineBetween(x + 16 + (counterW / 3) * i, y + 32, x + 16 + (counterW / 3) * i, y + 62);
+    // Upper cabinets, then the counter under them.
+    this.box(g, x + 10, y - 6, w - 130, 22, 14, FINISH.cabinet, FINISH.cabinetDark, 3);
+    this.box(g, x + 10, y + 26, w - 130, 30, 18, FINISH.counter, FINISH.counterDark, 3);
+    g.fillStyle(FINISH.counterEdge, 1).fillRect(x + 10, y + 26, w - 130, 3);
+
+    // Espresso machine, a kettle, the sink and its tap.
+    this.box(g, x + 26, y + 10, 34, 18, 14, 0x1f2937, 0x111827, 3);
+    g.fillStyle(t.accent, 0.8).fillRect(x + 32, y + 15, 22, 3);
+    g.fillStyle(0x94a3b8, 1).fillRect(x + 41, y + 28, 4, 7);
+    this.box(g, x + 72, y + 14, 18, 14, 12, 0xcbd5e1, 0x94a3b8, 3);
+    g.fillStyle(FINISH.counterDark, 1).fillRoundedRect(x + 110, y + 30, 40, 20, 4);
+    g.fillStyle(FINISH.brass, 1).fillRect(x + 128, y + 18, 3, 14).fillRect(x + 128, y + 18, 13, 3);
+    this.plant(g, x + 172, y + 30, 0.55);
+
+    // Tall fridge at the end of the run.
+    this.box(g, x + w - 104, y - 4, 44, 76, 20, 0xe2e8f0, 0xcbd5e1, 4);
+    g.fillStyle(0xcbd5e1, 1).fillRect(x + w - 104, y + 30, 44, 2);
+    g.fillStyle(0x94a3b8, 1).fillRoundedRect(x + w - 70, y + 10, 4, 14, 2);
+
+    // High table with stools, which is where people actually eat.
+    const tx = x + 70;
+    const ty = y + 92;
+    g.fillStyle(0x000000, 0.2).fillEllipse(tx + 3, ty + 8, 108, 36);
+    g.fillStyle(FINISH.walnutDark, 1).fillEllipse(tx, ty + 6, 104, 34);
+    g.fillStyle(FINISH.walnut, 1).fillEllipse(tx, ty + 2, 104, 34);
+    for (const dx of [-62, 62]) {
+      g.fillStyle(0x000000, 0.18).fillEllipse(tx + dx + 2, ty + 6, 26, 12);
+      g.fillStyle(FINISH.leatherDark, 1).fillEllipse(tx + dx, ty + 4, 26, 12);
+      g.fillStyle(FINISH.leather, 1).fillEllipse(tx + dx, ty, 26, 12);
     }
-    g.lineStyle(1, 0, 0);
-    g.fillStyle(FINISH.marble, 1).fillRoundedRect(x + 12, y + 22, counterW + 8, 11, 3);
-    g.fillStyle(FINISH.marbleVein, 1).fillRect(x + 40, y + 26, 44, 2);
+    // A fruit bowl, because an empty table looks abandoned.
+    g.fillStyle(FINISH.brass, 0.85).fillEllipse(tx, ty, 24, 10);
+    g.fillStyle(0xef7d55, 1).fillCircle(tx - 5, ty - 3, 4);
+    g.fillStyle(0x9ad636, 1).fillCircle(tx + 4, ty - 2, 4);
 
-    // Espresso machine, cups, and a brass tap over a sink.
-    g.fillStyle(0x1b2334, 1).fillRoundedRect(x + 26, y + 6, 30, 18, 3);
-    g.fillStyle(FINISH.brass, 0.9).fillRect(x + 36, y + 20, 10, 4);
-    g.fillStyle(0xf3f6fb, 1).fillCircle(x + 70, y + 17, 4);
-    g.fillStyle(0xf3f6fb, 1).fillCircle(x + 82, y + 17, 4);
-    g.lineStyle(2, FINISH.brass, 0.9);
-    g.beginPath();
-    g.arc(x + 128, y + 18, 8, Math.PI, Math.PI * 1.9);
-    g.strokePath();
-    g.lineStyle(1, 0, 0);
-    g.fillStyle(0x1b2334, 1).fillRoundedRect(x + 118, y + 24, 22, 8, 2);
-
-    // Tall fridge with a brass handle.
-    g.fillStyle(0x27384f, 1).fillRoundedRect(x + w - 66, y + 16, 46, 84, 6);
-    g.fillStyle(0x2f4360, 1).fillRoundedRect(x + w - 62, y + 20, 38, 36, 4);
-    g.fillStyle(0x2f4360, 1).fillRoundedRect(x + w - 62, y + 60, 38, 36, 4);
-    g.fillStyle(FINISH.brass, 0.9).fillRoundedRect(x + w - 30, y + 30, 4, 18, 2);
-
-    // Communal table on a rug, with stools.
-    const tableX = x + w / 2 - 28;
-    this.rug(g, tableX - 86, midY - 30, 172, 62);
-    g.fillStyle(FINISH.walnut, 1).fillRoundedRect(tableX - 52, midY - 16, 104, 28, 6);
-    g.fillStyle(FINISH.walnutDark, 1).fillRoundedRect(tableX - 46, midY + 10, 10, 10, 2);
-    g.fillStyle(FINISH.walnutDark, 1).fillRoundedRect(tableX + 36, midY + 10, 10, 10, 2);
-    // A bowl of fruit, because every good pantry has one.
-    g.fillStyle(FINISH.brass, 0.85).fillCircle(tableX, midY - 4, 8);
-    g.fillStyle(0xe4703a, 1).fillCircle(tableX - 3, midY - 8, 3);
-    g.fillStyle(0xd9b43c, 1).fillCircle(tableX + 3, midY - 8, 3);
-
-    for (const dx of [-74, 74]) {
-      g.fillStyle(FINISH.leatherDark, 1).fillCircle(tableX + dx, midY + 4, 11);
-      g.fillStyle(FINISH.leather, 1).fillCircle(tableX + dx, midY + 1, 10);
-    }
-
-    this.plant(g, x + 18, y + h - 24, 0.7);
+    this.plant(g, x + w - 26, y + h - 20, 1.05);
 
     this.spots.push(
-      { x: tableX - 74, y: midY + 8, sit: true, takenBy: null },
-      { x: tableX + 74, y: midY + 8, sit: true, takenBy: null },
-      { x: x + 70, y: y + h - 20, sit: false, takenBy: null },
+      { x: tx - 62, y: ty + 2, sit: true, takenBy: null },
+      { x: tx + 62, y: ty + 2, sit: true, takenBy: null },
+      { x: x + 40, y: y + 62, sit: false, takenBy: null },
+      { x: x + 150, y: y + 62, sit: false, takenBy: null },
     );
   }
 
-  drawWaterCooler(x, y) {
-    const g = this.add.graphics().setDepth(DEPTH.furniture);
-    g.fillStyle(0x1e293b, 1).fillRoundedRect(x - 11, y - 10, 22, 30, 3);
-    g.fillStyle(0x38bdf8, 0.75).fillRoundedRect(x - 8, y - 22, 16, 16, 4);
-    this.labelProp(x, y + 26, 'water');
+  /** The meeting table in the middle of the floor, with chairs round it. */
+  drawMeetingTable(x, y) {
+    const t = this.theme;
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
+
+    this.rug(g, x - 150, y - 56, 300, 112, t.rugAlt, t.accent);
+
+    // Chairs first, so the table sits over them.
+    for (const [dx, dy] of [[-76, -34], [0, -38], [76, -34], [-76, 34], [0, 38], [76, 34]]) {
+      g.fillStyle(0x000000, 0.18).fillEllipse(x + dx + 2, y + dy + 4, 28, 13);
+      g.fillStyle(FINISH.chairDark, 1).fillEllipse(x + dx, y + dy + 2, 28, 13);
+      g.fillStyle(FINISH.chair, 1).fillEllipse(x + dx, y + dy - 1, 28, 13);
+      g.fillStyle(FINISH.chairDark, 1)
+        .fillRoundedRect(x + dx - 12, y + dy + (dy < 0 ? -12 : 4), 24, 9, 3);
+    }
+
+    g.fillStyle(0x000000, 0.22).fillEllipse(x + 4, y + 8, 212, 76);
+    g.fillStyle(FINISH.walnutDark, 1).fillEllipse(x, y + 5, 208, 74);
+    g.fillStyle(FINISH.walnut, 1).fillEllipse(x, y, 208, 74);
+    g.fillStyle(0xffffff, 0.05).fillEllipse(x - 30, y - 12, 90, 26);
+
+    // What is on it: a laptop, papers, a carafe.
+    g.fillStyle(0x1f2937, 1).fillRoundedRect(x - 56, y - 12, 34, 20, 2);
+    g.fillStyle(t.accent, 0.3).fillRoundedRect(x - 53, y - 9, 28, 13, 2);
+    g.fillStyle(0xf1f5f9, 0.85).fillRoundedRect(x + 10, y - 6, 26, 16, 2);
+    g.fillStyle(0x94a3b8, 1).fillRoundedRect(x + 52, y - 10, 12, 20, 3);
+
+    this.labelProp(x, y + 50, 'meeting');
     this.spots.push(
-      { x: x - 54, y: y + 8, sit: false, takenBy: null },
-      { x: x + 54, y: y + 8, sit: false, takenBy: null },
+      { x: x - 76, y: y - 34, sit: true, takenBy: null },
+      { x: x + 76, y: y - 34, sit: true, takenBy: null },
+      { x: x - 76, y: y + 34, sit: true, takenBy: null },
+      { x: x + 76, y: y + 34, sit: true, takenBy: null },
     );
   }
 
-  drawPrinter(x, y) {
-    const g = this.add.graphics().setDepth(DEPTH.furniture);
-    g.fillStyle(0x1e293b, 1).fillRoundedRect(x - 18, y - 10, 36, 22, 3);
-    g.fillStyle(0x475569, 1).fillRect(x - 12, y - 16, 24, 7);
-    g.fillStyle(0x94a3b8, 1).fillRect(x - 9, y + 12, 18, 5);
-    this.labelProp(x, y + 24, 'printer');
+  /**
+   * The one piece of kit that says what this business actually does. Same
+   * ten desks everywhere; this is what makes a salon's floor not an IT
+   * shop's.
+   */
+  drawFeature(t) {
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
+    const x = 70;
+    const y = 452;
+
+    if (t.feature === 'workbench') {
+      // A bench with a pegboard of tools over it.
+      this.box(g, x - 44, y - 34, 106, 26, 14, FINISH.walnut, FINISH.walnutDark, 3);
+      g.fillStyle(0x3f4a5c, 1).fillRoundedRect(x - 42, y - 66, 102, 30, 3);
+      g.fillStyle(0x2c3545, 0.5);
+      for (let i = 0; i < 10; i += 1) g.fillCircle(x - 36 + i * 11, y - 60, 1.4);
+      for (let i = 0; i < 5; i += 1) {
+        g.fillStyle(i % 2 ? t.accent : 0xb9c0cb, 0.9)
+          .fillRoundedRect(x - 36 + i * 21, y - 58, 5, 18, 2);
+      }
+      g.fillStyle(0x64748b, 1).fillRoundedRect(x - 28, y - 30, 24, 9, 2);
+      g.fillStyle(t.accent, 0.9).fillRoundedRect(x + 4, y - 28, 18, 6, 2);
+      this.labelProp(x + 8, y + 6, 'workbench');
+    } else if (t.feature === 'rack') {
+      // A short server rack with its lights on.
+      this.box(g, x - 34, y - 56, 78, 34, 42, 0x1f2937, 0x111827, 3);
+      for (let i = 0; i < 5; i += 1) {
+        g.fillStyle(0x0f172a, 1).fillRoundedRect(x - 28, y - 50 + i * 7, 66, 5, 1);
+        g.fillStyle(i % 2 ? 0x34d399 : t.accent, 0.9).fillCircle(x + 32, y - 48 + i * 7, 1.8);
+      }
+      this.labelProp(x + 5, y + 2, 'rack');
+    } else if (t.feature === 'shelving') {
+      // Stock shelving with boxes on it.
+      this.box(g, x - 50, y - 54, 120, 32, 30, FINISH.cabinet, FINISH.cabinetDark, 2);
+      for (let r = 0; r < 2; r += 1) {
+        for (let i = 0; i < 4; i += 1) {
+          g.fillStyle(i % 2 ? FINISH.walnut : t.accent, 0.75)
+            .fillRoundedRect(x - 44 + i * 29, y - 50 + r * 15, 24, 11, 2);
+        }
+      }
+      this.labelProp(x + 10, y + 2, 'stock');
+    } else if (t.feature === 'prep') {
+      // A stainless prep counter with a hob.
+      this.box(g, x - 48, y - 44, 116, 30, 16, 0xcbd5e1, 0x94a3b8, 3);
+      g.fillStyle(0x334155, 1).fillRoundedRect(x - 40, y - 40, 40, 22, 3);
+      for (const [dx, dy] of [[-32, -34], [-12, -34], [-32, -26], [-12, -26]]) {
+        g.fillStyle(t.accent, 0.8).fillCircle(x + dx, y + dy, 4);
+      }
+      g.fillStyle(0x94a3b8, 1).fillRoundedRect(x + 12, y - 38, 34, 18, 3);
+      this.labelProp(x + 10, y + 2, 'prep');
+    } else if (t.feature === 'plans') {
+      // A plan table with rolled drawings beside it.
+      this.box(g, x - 50, y - 46, 118, 34, 14, FINISH.walnut, FINISH.walnutDark, 2);
+      g.fillStyle(0xe2e8f0, 0.9).fillRoundedRect(x - 42, y - 42, 70, 26, 2);
+      g.lineStyle(1, 0x64748b, 0.8);
+      g.strokeRect(x - 36, y - 37, 30, 16).strokeRect(x - 2, y - 37, 22, 16);
+      g.lineStyle(0, 0, 0);
+      for (let i = 0; i < 3; i += 1) {
+        g.fillStyle(0xcbd5e1, 1).fillRoundedRect(x + 40 + i * 9, y - 42, 7, 28, 3);
+      }
+      this.labelProp(x + 10, y + 2, 'plans');
+    } else if (t.feature === 'pallets') {
+      // Stacked pallets and a trolley.
+      for (let i = 0; i < 3; i += 1) {
+        this.box(g, x - 40 + i * 4, y - 30 - i * 10, 74, 22, 10,
+          FINISH.walnut, FINISH.walnutDark, 2);
+      }
+      g.fillStyle(t.accent, 0.8).fillRoundedRect(x - 20, y - 56, 32, 14, 2);
+      g.fillStyle(0x475569, 1).fillRoundedRect(x + 46, y - 36, 6, 34, 2);
+      this.labelProp(x + 10, y + 4, 'pallets');
+    } else if (t.feature === 'mirror') {
+      // A styling station: mirror, chair, trolley.
+      g.fillStyle(FINISH.brass, 1).fillRoundedRect(x - 36, y - 78, 72, 54, 26);
+      g.fillStyle(0x334155, 1).fillRoundedRect(x - 32, y - 74, 64, 46, 22);
+      g.fillStyle(0xffffff, 0.12).fillRoundedRect(x - 24, y - 68, 22, 34, 11);
+      this.box(g, x - 40, y - 24, 80, 24, 14, FINISH.counter, FINISH.counterDark, 3);
+      g.fillStyle(t.accent, 0.8).fillCircle(x - 20, y - 16, 4);
+      g.fillStyle(0xcbd5e1, 1).fillCircle(x, y - 16, 4);
+      this.labelProp(x + 6, y + 6, 'styling');
+    } else {
+      // A bookcase: the plain, respectable default.
+      this.box(g, x - 46, y - 56, 108, 32, 34, FINISH.walnut, FINISH.walnutDark, 2);
+      for (let r = 0; r < 2; r += 1) {
+        for (let i = 0; i < 9; i += 1) {
+          g.fillStyle(i % 3 === 0 ? t.accent : i % 3 === 1 ? 0x94a3b8 : FINISH.leather, 0.8)
+            .fillRoundedRect(x - 40 + i * 11, y - 52 + r * 15, 7, 12, 1);
+        }
+      }
+      this.labelProp(x + 8, y + 2, 'library');
+    }
+
     this.spots.push(
-      { x: x - 54, y: y + 6, sit: false, takenBy: null },
-      { x: x + 54, y: y + 6, sit: false, takenBy: null },
+      { x: x - 60, y: y + 10, sit: false, takenBy: null },
+      { x: x + 70, y: y + 10, sit: false, takenBy: null },
     );
+  }
+
+  /** Planters down the middle and trees in the corners. */
+  drawGreenery(t) {
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
+
+    // A long planter box between the two desk rows, which is also what stops
+    // the middle of the room looking like a corridor.
+    const px = WIDTH / 2 - 230;
+    this.box(g, px, 436, 70, 22, 12, FINISH.pot, FINISH.potDark, 4);
+    this.plant(g, px + 20, 444, 0.6);
+    this.plant(g, px + 50, 446, 0.5, true);
+    this.box(g, WIDTH / 2 + 160, 436, 70, 22, 12, FINISH.pot, FINISH.potDark, 4);
+    this.plant(g, WIDTH / 2 + 180, 444, 0.55, true);
+    this.plant(g, WIDTH / 2 + 210, 446, 0.62);
+
+    // Corner trees, bigger than anything on a desk.
+    this.plant(g, 46, HEIGHT - 54, 1.5);
+    this.plant(g, WIDTH - 46, HEIGHT - 54, 1.4, true);
+    this.plant(g, WIDTH - 44, 418, 1.25);
+
+    // A water point, because people walk to one.
+    const wx = WIDTH - 120;
+    const wy = 452;
+    this.box(g, wx - 12, wy - 10, 26, 22, 24, 0xe2e8f0, 0xcbd5e1, 3);
+    g.fillStyle(t.sky, 0.75).fillRoundedRect(wx - 9, wy - 28, 20, 20, 5);
+    this.labelProp(wx, wy + 22, 'water');
+    this.spots.push(
+      { x: wx - 46, y: wy + 8, sit: false, takenBy: null },
+      { x: wx + 46, y: wy + 8, sit: false, takenBy: null },
+    );
+  }
+
+  zoneLabel(x, y, text) {
+    this.keep(this.add.text(x, y, text, {
+      fontFamily: 'ui-monospace, monospace', fontSize: '10px',
+      color: this.theme.labelInk, letterSpacing: 2,
+    })).setDepth(DEPTH.labels);
   }
 
   labelProp(x, y, text) {
-    this.add.text(x, y, text, {
-      fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: '#475569',
-    }).setOrigin(0.5).setDepth(DEPTH.labels);
+    this.keep(this.add.text(x, y, text, {
+      fontFamily: 'ui-monospace, monospace', fontSize: '9px',
+      color: this.theme.labelInk,
+    })).setOrigin(0.5).setDepth(DEPTH.labels);
   }
 
-  /** A desk, its monitor, and the chair its agent works from. */
+  /**
+   * A desk: a rug, the desk itself with a front face, a monitor on a stand,
+   * the things that are actually on a desk, and the chair its agent works
+   * from. The agent is drawn on top of the chair.
+   */
   drawDesk(x, y) {
-    const g = this.add.graphics().setDepth(DEPTH.furniture);
+    const t = this.theme;
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
 
-    // A rug under each desk, so the work area is not bare floor.
-    g.fillStyle(0x1a2335, 1).fillRoundedRect(x - 84, y - 20, 168, 78, 10);
+    // No rug under a desk: on boards it only reads as a grey slab. A soft
+    // pool of shadow is what actually lifts the furniture off the floor.
+    g.fillStyle(0x000000, 0.055).fillEllipse(x + 3, y + 16, 164, 62);
 
-    // Walnut desk with a marble edge and a brass modesty rail.
-    g.fillStyle(FINISH.walnutDark, 1).fillRoundedRect(x - 66, y - 12, 132, 30, 5);
-    g.fillStyle(FINISH.walnut, 1).fillRoundedRect(x - 63, y - 10, 126, 24, 4);
-    g.fillStyle(FINISH.marble, 1).fillRoundedRect(x - 66, y - 16, 132, 8, 3);
-    g.fillStyle(FINISH.marbleVein, 1).fillRect(x - 40, y - 13, 30, 1.5);
-    g.fillStyle(FINISH.brass, 0.55).fillRect(x - 54, y + 15, 108, 2);
+    // Desk: top face, front face, and a shadow under it.
+    g.fillStyle(0x000000, 0.22).fillRoundedRect(x - 64, y + 2, 132, 22, 4);
+    g.fillStyle(t.deskDark, 1).fillRoundedRect(x - 66, y - 2, 132, 20, 4);
+    g.fillStyle(t.desk, 1).fillRoundedRect(x - 66, y - 16, 132, 22, 4);
+    g.fillStyle(0xffffff, 0.06).fillRect(x - 60, y - 13, 60, 3);
+    // A pedestal of drawers under one end.
+    g.fillStyle(t.deskDark, 1).fillRoundedRect(x + 26, y + 2, 38, 26, 3);
+    g.fillStyle(FINISH.brassDim, 0.8).fillRect(x + 34, y + 9, 22, 2).fillRect(x + 34, y + 19, 22, 2);
 
-    // Monitor on a brass stand.
-    g.fillStyle(0x0a111d, 1).fillRoundedRect(x - 23, y - 40, 46, 24, 3);
-    g.fillStyle(0x1b3a6b, 0.6).fillRoundedRect(x - 19, y - 36, 38, 15, 2);
-    g.fillStyle(0x3fbdf0, 0.25).fillRect(x - 17, y - 34, 20, 3);
-    g.fillStyle(0x3fbdf0, 0.18).fillRect(x - 17, y - 29, 30, 2);
-    g.fillStyle(FINISH.brassDim, 1).fillRect(x - 3, y - 17, 6, 3);
+    // Monitor: panel, screen, stand.
+    g.fillStyle(0x0a111d, 1).fillRoundedRect(x - 26, y - 46, 52, 28, 3);
+    g.fillStyle(t.screen, 0.75).fillRoundedRect(x - 22, y - 42, 44, 19, 2);
+    g.fillStyle(0xffffff, 0.18).fillRect(x - 19, y - 39, 22, 3);
+    g.fillStyle(0xffffff, 0.1).fillRect(x - 19, y - 33, 32, 2);
+    g.fillStyle(0xffffff, 0.1).fillRect(x - 19, y - 28, 26, 2);
+    g.fillStyle(0x1f2937, 1).fillRect(x - 4, y - 19, 8, 4);
+    g.fillStyle(0x334155, 1).fillRoundedRect(x - 12, y - 16, 24, 3, 1);
 
-    // Keyboard, a notebook and a coffee, which is what a desk really has.
-    g.fillStyle(0x2c3a52, 1).fillRoundedRect(x - 16, y - 4, 32, 7, 2);
-    g.fillStyle(0xd8dee9, 0.85).fillRoundedRect(x + 24, y - 4, 14, 9, 1.5);
-    g.fillStyle(FINISH.brass, 0.75).fillCircle(x - 32, y + 1, 4);
+    // Keyboard, notepad, a mug, a small plant.
+    g.fillStyle(0x2c3a52, 1).fillRoundedRect(x - 18, y - 9, 34, 8, 2);
+    g.fillStyle(0xe2e8f0, 0.9).fillRoundedRect(x - 46, y - 9, 16, 11, 1.5);
+    g.fillStyle(t.accent, 0.85).fillCircle(x - 54, y - 2, 4.5);
+    g.fillStyle(0xffffff, 0.25).fillCircle(x - 55, y - 3.5, 1.6);
+    this.plant(g, x + 48, y - 6, 0.34);
 
-    // Leather task chair, tucked under; the agent is drawn on top of it.
-    g.fillStyle(FINISH.leatherDark, 1).fillRoundedRect(x - 15, y + 24, 30, 15, 6);
-    g.fillStyle(FINISH.leather, 1).fillRoundedRect(x - 13, y + 26, 26, 11, 5);
-    g.fillStyle(0x24314a, 1).fillRoundedRect(x - 4, y + 38, 8, 9, 3);
-    g.fillStyle(0x2c3a52, 1).fillRoundedRect(x - 12, y + 46, 24, 4, 2);
+    // Task chair seen from above: seat, back, five-star base.
+    g.fillStyle(0x000000, 0.2).fillEllipse(x + 2, y + 44, 36, 16);
+    g.fillStyle(FINISH.chairDark, 1).fillEllipse(x, y + 42, 34, 15);
+    g.fillStyle(FINISH.chair, 1).fillEllipse(x, y + 39, 34, 15);
+    g.fillStyle(FINISH.chairDark, 1).fillRoundedRect(x - 14, y + 44, 28, 10, 4);
+    g.fillStyle(0x475569, 1);
+    for (let i = 0; i < 5; i += 1) {
+      const a = (i / 5) * Math.PI * 2 + 0.3;
+      g.fillRect(x - 1.5 + Math.cos(a) * 9, y + 52 + Math.sin(a) * 5, 3, 3);
+    }
+    // Handed back so the desk goes when its agent does — otherwise switching
+    // floors would leave the old office's furniture behind.
+    return g;
   }
 
   // --------------------------------------------------------- sync + people
@@ -355,7 +734,7 @@ class OfficeScene extends Phaser.Scene {
     const skin = SKIN_TONES[Math.abs(hash(agent.id)) % SKIN_TONES.length];
 
     const desk = { x: agent.desk_x, y: agent.desk_y };
-    this.drawDesk(desk.x, desk.y);
+    const deskArt = this.drawDesk(desk.x, desk.y);
     // The figure: shadow, legs, torso, arms, head. Parts rotate at the joint,
     // which is why each limb has its origin at the top.
     const body = this.add.container(desk.x, desk.y + 30).setDepth(DEPTH.people);
@@ -393,7 +772,7 @@ class OfficeScene extends Phaser.Scene {
     }).setOrigin(0.5).setDepth(DEPTH.labels);
 
     const person = {
-      id: agent.id, data: agent, body, label, roleLabel, statusText,
+      id: agent.id, data: agent, body, label, roleLabel, statusText, deskArt,
       parts: { legL, legR, armL, armR, torso, head, hair, marker, shadow },
       desk,
       seat: { x: desk.x, y: desk.y + 30 },
@@ -415,6 +794,7 @@ class OfficeScene extends Phaser.Scene {
 
   destroyPerson(person) {
     this.releaseSpot(person);
+    person.deskArt?.destroy();
     person.body.destroy();
     person.label.destroy();
     person.roleLabel.destroy();
@@ -672,7 +1052,7 @@ function hash(value) {
   return out;
 }
 
-export default function VirtualOfficeCanvas({ agents, onSelectAgent }) {
+export default function VirtualOfficeCanvas({ agents, floor, onSelectAgent }) {
   const hostRef = useRef(null);
   const gameRef = useRef(null);
   const sceneRef = useRef(null);
@@ -693,7 +1073,7 @@ export default function VirtualOfficeCanvas({ agents, onSelectAgent }) {
       parent: hostRef.current,
       width: WIDTH,
       height: HEIGHT,
-      backgroundColor: '#0f172a',
+      backgroundColor: '#1b2334',
       scale: {
         mode: Phaser.Scale.FIT,
         autoCenter: Phaser.Scale.CENTER_HORIZONTALLY,
@@ -708,10 +1088,12 @@ export default function VirtualOfficeCanvas({ agents, onSelectAgent }) {
     return () => { game.destroy(true); gameRef.current = null; sceneRef.current = null; };
   }, []);
 
-  // Push data in; never re-render the canvas through React.
+  // Which office this is, then who is in it. The order matters: the room is
+  // rebuilt first so the people are placed in the room they are actually in.
   useEffect(() => {
+    sceneRef.current?.setFloor(floor ?? null);
     sceneRef.current?.syncAgents(agents ?? []);
-  }, [agents]);
+  }, [agents, floor]);
 
   return <div ref={hostRef} className="w-full overflow-hidden rounded-xl border border-slate-800" />;
 }

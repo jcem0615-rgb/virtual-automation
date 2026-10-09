@@ -330,6 +330,7 @@ export default function App() {
             )}
             <VirtualOfficeCanvas
               agents={floorAgents}
+              floor={businesses.find((b) => b.id === floorId) ?? null}
               onSelectAgent={(a) => setSelectedAgentId(a.id)}
             />
           </div>
