@@ -119,16 +119,34 @@
       "notes": "Replace with an SMTP / Gmail node. Subject and body are in payload.draft."
     },
     {
-      "parameters": {},
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/me/messages",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $env.META_PAGE_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ recipient: { id: $json.body.payload.recipient }, messaging_type: 'RESPONSE', message: { text: $json.body.payload.draft } }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
       "id": "b1000000-0000-4000-8000-000000000004",
-      "name": "Send Meta DM — PLACEHOLDER",
-      "type": "n8n-nodes-base.noOp",
-      "typeVersion": 1,
+      "name": "Send Messenger Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         -140,
         260
       ],
-      "notes": "Replace with a Meta Graph API call to the page conversation."
+      "notes": "Sends the approved text to the customer's Messenger thread. The 24-hour standard messaging window applies; outside it you need a message tag."
     },
     {
       "parameters": {},
@@ -221,7 +239,7 @@
         ],
         [
           {
-            "node": "Send Meta DM — PLACEHOLDER",
+            "node": "Send Messenger Reply",
             "type": "main",
             "index": 0
           }
@@ -243,17 +261,6 @@
       ]
     },
     "Send Email — PLACEHOLDER": {
-      "main": [
-        [
-          {
-            "node": "Release Agent",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Send Meta DM — PLACEHOLDER": {
       "main": [
         [
           {
@@ -291,6 +298,17 @@
         [
           {
             "node": "Respond Dispatched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Messenger Reply": {
+      "main": [
+        [
+          {
+            "node": "Release Agent",
             "type": "main",
             "index": 0
           }

@@ -1,0 +1,436 @@
+{
+  "name": "Messenger → CRM Draft → Approval",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "messenger",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000001",
+      "name": "Meta Verify (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -760,
+        120
+      ],
+      "webhookId": "messenger-verify",
+      "notes": "Meta calls this once when you subscribe the webhook. It must echo hub.challenge."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "v1",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $json.query['hub.verify_token'] }}",
+              "rightValue": "={{ $env.META_VERIFY_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000002",
+      "name": "Token Matches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -540,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $('Meta Verify (GET)').item.json.query['hub.challenge'] }}",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000003",
+      "name": "Echo Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "verification failed",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "c1000000-0000-4000-8000-000000000004",
+      "name": "Reject Verification",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        190
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "messenger",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "c1000000-0000-4000-8000-000000000005",
+      "name": "Messenger Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -760,
+        400
+      ],
+      "webhookId": "messenger",
+      "notes": "Every inbound message and delivery receipt from the page arrives here."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Verify Meta's signature, then pull out the one thing we care about:\n// who wrote, and what they said. Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto,\n// which docker-compose.yml sets for the n8n service.\nconst crypto = require('crypto');\n\nconst raw = $input.item.binary?.data\n  ? Buffer.from($input.item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify($input.item.json.body ?? {});\nconst signature = $input.item.json.headers?.['x-hub-signature-256'] ?? '';\nconst secret = $env.META_APP_SECRET;\n\nif (secret) {\n  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(signature);\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    throw new Error('bad X-Hub-Signature-256 — dropping this delivery');\n  }\n}\n\nconst body = typeof raw === 'string' ? JSON.parse(raw) : raw;\nconst entry = body.entry?.[0] ?? {};\nconst event = entry.messaging?.[0] ?? {};\n\n// Echoes of our own sends, and read receipts, are not customer messages.\nconst text = event.message?.text;\nconst isEcho = event.message?.is_echo === true;\n\nreturn { json: {\n  skip: !text || isEcho,\n  psid: event.sender?.id ?? null,\n  page_id: entry.id ?? null,\n  message: text ?? '',\n  business_code: $env.META_BUSINESS_CODE || 'BIZ_ELEC',\n} };"
+      },
+      "id": "c1000000-0000-4000-8000-000000000006",
+      "name": "Verify & Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -540,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "s1",
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              },
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000007",
+      "name": "A Real Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/checkout",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ business_code: $json.business_code, department: 'CRM', task: 'Messenger: ' + $json.message.slice(0, 100) }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "c1000000-0000-4000-8000-000000000008",
+      "name": "Checkout CRM Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -100,
+        340
+      ],
+      "notes": "423 means a human paused the CRM desk — the conversation is left alone."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a1",
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000009",
+      "name": "Agent Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        120,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const lead = $('Verify & Extract').item.json;\nconst agent = $('Checkout CRM Agent').item.json.body.agent;\n\nreturn { json: {\n  agent_id: agent.id,\n  lead,\n  prompt: [\n    'You are ' + agent.name + ', the customer care agent for a Philippine service business.',\n    'Reply to this Facebook Messenger message in warm, natural English.',\n    'Quote prices in PHP. Two or three sentences. Output only the reply text.',\n    '',\n    'Customer message: ' + lead.message,\n    lead.feedback ? '\\nA human reviewer rejected your previous draft.\\nPrevious draft: ' + lead.previous_draft + '\\nFeedback: ' + lead.feedback + '\\nRewrite it.' : '',\n  ].join('\\n'),\n} };"
+      },
+      "id": "c1000000-0000-4000-8000-00000000000a",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OLLAMA_URL }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL || 'llama3.1', prompt: $json.prompt, stream: false }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "c1000000-0000-4000-8000-00000000000b",
+      "name": "Ollama Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/approvals",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ agent_id: $('Build Prompt').item.json.agent_id, payload: { type: 'messenger_reply', title: 'Messenger reply to ' + $('Build Prompt').item.json.lead.psid, draft: ($json.response || '').trim(), channel: 'meta_dm', recipient: $('Build Prompt').item.json.lead.psid, source: $('Build Prompt').item.json.lead } }) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "c1000000-0000-4000-8000-00000000000c",
+      "name": "File For Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        280
+      ],
+      "notes": "The reply is NOT sent yet. It waits on the dashboard; the dispatch workflow sends it."
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "EVENT_RECEIVED",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-00000000000d",
+      "name": "Ack Meta",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        400
+      ],
+      "notes": "Meta retries anything not acknowledged within a few seconds."
+    }
+  ],
+  "connections": {
+    "Meta Verify (GET)": {
+      "main": [
+        [
+          {
+            "node": "Token Matches?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Token Matches?": {
+      "main": [
+        [
+          {
+            "node": "Echo Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Messenger Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify & Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify & Extract": {
+      "main": [
+        [
+          {
+            "node": "A Real Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A Real Message?": {
+      "main": [
+        [
+          {
+            "node": "Checkout CRM Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ack Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checkout CRM Agent": {
+      "main": [
+        [
+          {
+            "node": "Agent Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Available?": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ack Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Ollama Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Draft": {
+      "main": [
+        [
+          {
+            "node": "File For Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File For Approval": {
+      "main": [
+        [
+          {
+            "node": "Ack Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "virtual-office-dev"
+  }
+}

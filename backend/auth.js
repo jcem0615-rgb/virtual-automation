@@ -112,17 +112,22 @@ export async function resolveSession(token) {
   if (!token) return null;
   const { rows } = await q(
     `SELECT s.id AS session_id, s.last_seen_at,
-            u.id, u.email, u.display_name,
+            u.id, u.email, u.display_name, u.is_platform_owner,
             COALESCE(
               array_agg(ub.business_id ORDER BY ub.business_id)
                 FILTER (WHERE ub.business_id IS NOT NULL),
               '{}'
-            ) AS business_ids
+            ) AS business_ids,
+            COALESCE(
+              jsonb_object_agg(ub.business_id, ub.role)
+                FILTER (WHERE ub.business_id IS NOT NULL),
+              '{}'::jsonb
+            ) AS roles
        FROM sessions s
        JOIN users u ON u.id = s.user_id
   LEFT JOIN user_businesses ub ON ub.user_id = u.id
       WHERE s.token_hash = $1 AND s.expires_at > now() AND u.is_active
-   GROUP BY s.id, s.last_seen_at, u.id, u.email, u.display_name`,
+   GROUP BY s.id, s.last_seen_at, u.id, u.email, u.display_name, u.is_platform_owner`,
     [sha256(token)],
   );
   const row = rows[0];
@@ -142,7 +147,9 @@ export async function resolveSession(token) {
     id: row.id,
     email: row.email,
     displayName: row.display_name,
+    isPlatformOwner: row.is_platform_owner,
     businessIds: row.business_ids,
+    roles: row.roles ?? {},      // business_id -> 'owner' | 'reviewer'
   };
 }
 
@@ -221,6 +228,35 @@ export function requireUser(req, _res, next) {
     .catch(next);
 }
 
+/** What this user is inside one business, or null if they are not in it. */
+export function roleFor(user, businessId) {
+  return user.roles?.[businessId] ?? null;
+}
+
+/**
+ * Guard for the things only a business owner may do. A reviewer reads the
+ * floor and decides on drafts; switching a desk off is an owner's call.
+ */
+export function requireOwner(user, businessId) {
+  const role = roleFor(user, businessId);
+  if (!role) throw new HttpError(404, 'not found');
+  if (role !== 'owner') {
+    throw new HttpError(403, 'only an owner can do that — you are a reviewer here');
+  }
+  return role;
+}
+
+/** Guard for the platform portal: running the deployment, not a tenant. */
+export function requirePlatformOwner(req, _res, next) {
+  requireUser(req, _res, (err) => {
+    if (err) return next(err);
+    if (!req.user?.isPlatformOwner) {
+      return next(new HttpError(403, 'this is the platform operator area'));
+    }
+    next();
+  });
+}
+
 /**
  * Tenant scope for an authenticated request. `requested` is what the UI asked
  * for; what comes back is always limited to the user's own businesses, so a
@@ -252,6 +288,10 @@ export async function createUser({ email, password, displayName }) {
     [normalised, passwordHash, String(displayName ?? normalised.split('@')[0])],
   );
   return rows[0];
+}
+
+export async function setPlatformOwner(userId, value = true) {
+  await q('UPDATE users SET is_platform_owner = $2 WHERE id = $1', [userId, value]);
 }
 
 export async function grantBusiness(userId, businessId, role = 'reviewer') {

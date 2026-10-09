@@ -7,6 +7,7 @@ import { api, Unauthorized } from './api.js';
 import VirtualOfficeCanvas from './components/VirtualOfficeCanvas.jsx';
 import ApprovalModal from './components/ApprovalModal.jsx';
 import Login from './Login.jsx';
+import ControlRoom from './ControlRoom.jsx';
 
 const STATUS_PILL = {
   IDLE: 'bg-slate-800 text-slate-300',
@@ -22,6 +23,7 @@ const timeOf = (value) =>
 
 export default function App() {
   const [user, setUser] = useState(undefined);   // undefined = still checking
+  const [view, setView] = useState('auto');      // 'auto' | 'floor' for operators
   const [businessId, setBusinessId] = useState('all');
   const [businesses, setBusinesses] = useState([]);
   const [agents, setAgents] = useState([]);
@@ -34,6 +36,10 @@ export default function App() {
   const socketRef = useRef(null);
   const businessRef = useRef(businessId);
   businessRef.current = businessId;
+
+  // A platform operator sitting in the control room is not on a floor: there
+  // is no tenant state to fetch and no room to join.
+  const onFloor = Boolean(user) && !(user?.isPlatformOwner && view === 'auto');
 
   // Any 401 means the session ended — drop to sign-in instead of showing
   // a dashboard full of stale rows.
@@ -67,7 +73,7 @@ export default function App() {
       .catch(() => setUser(null));
   }, []);
 
-  useEffect(() => { if (user) load(businessId); }, [user, businessId, load]);
+  useEffect(() => { if (onFloor) load(businessId); }, [onFloor, businessId, load]);
 
   // An account with a single business has nothing to filter — scope to it.
   useEffect(() => {
@@ -76,7 +82,7 @@ export default function App() {
 
   // One socket per signed-in session; the room changes with the filter.
   useEffect(() => {
-    if (!user) return undefined;
+    if (!onFloor) return undefined;
     const socket = io(import.meta.env.VITE_API_BASE ?? '/', {
       transports: ['websocket', 'polling'],
     });
@@ -120,11 +126,11 @@ export default function App() {
     });
 
     return () => { socket.close(); socketRef.current = null; };
-  }, [user, load, signedOut]);
+  }, [onFloor, load, signedOut]);
 
   useEffect(() => {
-    socketRef.current?.emit('subscribe', { businessId });
-  }, [businessId]);
+    if (onFloor) socketRef.current?.emit('subscribe', { businessId });
+  }, [onFloor, businessId]);
 
   const pendingByAgent = useMemo(() => {
     const map = new Map();
@@ -161,7 +167,20 @@ export default function App() {
     );
   }
   if (user === null) {
-    return <Login onSignedIn={(signedIn) => { setBusinessId('all'); setUser(signedIn); }} />;
+    return <Login onSignedIn={(signedIn) => { setBusinessId('all'); setView('auto'); setUser(signedIn); }} />;
+  }
+
+  // A platform operator lands in the control room. They only reach a floor if
+  // some business has actually granted them an account on it.
+  if (user.isPlatformOwner && view === 'auto') {
+    return (
+      <ControlRoom
+        user={user}
+        floors={businesses}
+        onEnterFloor={(id) => { setBusinessId(id); setView('floor'); }}
+        onSignOut={signOut}
+      />
+    );
   }
 
   return (
@@ -198,6 +217,14 @@ export default function App() {
           <span className="rounded-full bg-amber-950 px-3 py-1 text-xs text-amber-300">
             {approvals.length} awaiting approval
           </span>
+          {user.isPlatformOwner && (
+            <button
+              onClick={() => setView('auto')}
+              className="rounded-lg border border-amber-900 px-3 py-1.5 text-xs text-amber-300 hover:bg-amber-950/50"
+            >
+              Control Room
+            </button>
+          )}
           <span className="hidden text-xs text-slate-500 sm:inline">{user.email}</span>
           <button
             onClick={signOut}
@@ -293,6 +320,7 @@ export default function App() {
           agent={selectedAgent}
           approval={selectedApproval}
           onClose={() => setSelectedAgentId(null)}
+          canPause={(user.roles?.[selectedAgent.business_id] ?? null) === 'owner'}
           onApprove={(id) => act(() => api.approve(id))}
           onReject={(id, feedback) => act(() => api.reject(id, feedback))}
           onKill={(agentId, resume) => act(() => api.kill(agentId, resume))}

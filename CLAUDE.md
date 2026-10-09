@@ -15,10 +15,13 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
+| `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
-| `workflows/*.json` | n8n exports. Import through the n8n UI. |
+| `workflows/workflow_sales_lead.json` | Lead → checkout → Ollama → approval. |
+| `workflows/workflow_messenger_inbound.json` | Meta webhook → CRM agent → approval. |
+| `workflows/workflow_approval_dispatch.json` | Approved → the real channel sender. |
 | `docker-compose.yml` | postgres, ollama, n8n, backend, frontend on one network. |
 | `docker-compose.prod.yml` | Overlay for a deployment that is reachable online. |
 
@@ -32,6 +35,11 @@ docker compose logs -f backend
 # Accounts. Nobody can sign in until you make the first one.
 docker compose exec backend node scripts/create-user.js \
   --email you@example.com --name "You" --business BIZ_ELEC --role owner
+
+# You, as the person running the deployment. Watches every floor, is a
+# member of none — so it can open businesses but cannot read their work.
+docker compose exec backend node scripts/create-user.js \
+  --email boss@example.com --name "You" --platform-owner
 
 # Deployed, with only the dashboard published (put TLS in front of it):
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
@@ -53,6 +61,8 @@ the realtime path depends on triggers.
 1. A lead hits the n8n webhook `POST /webhook/sales-lead`.
 2. n8n calls `POST /api/internal/agents/checkout` → agent becomes `WORKING`
    (HTTP 423 if the agent is `PAUSED`, which aborts the run).
+   A Facebook or Instagram message takes the same path through
+   `workflow_messenger_inbound.json`, which claims the `CRM` desk instead.
 3. n8n asks Ollama for a draft, then `POST /api/internal/approvals` → row is `PENDING`,
    agent becomes `AWAITING_APPROVAL`.
 4. Postgres triggers `NOTIFY`; `server.js` re-reads the row and emits to Socket.io rooms.
@@ -72,6 +82,16 @@ the realtime path depends on triggers.
   — the signed-in account's memberships — never straight from the request. A socket joins
   one room per business its user belongs to (`biz:<uuid>`); there is no global room, and
   nothing is emitted except through `broadcast(businessId, …)`.
+- **Roles are enforced server-side.** `owner` and `reviewer` both approve and reject;
+  only an `owner` may pause or resume an agent, checked with `requireOwner(user, businessId)`
+  before anything is written. The UI hides what a reviewer cannot do, but hiding is not
+  the enforcement — the route is.
+- **The platform operator sees activity, never content.** `is_platform_owner` unlocks
+  `/api/platform/*` only. Those handlers never select `payload_json`, `feedback` or
+  `resolved_by`, and an operator holds no `user_businesses` row, so every tenant-scoped
+  read returns nothing for them. Reading a business's work means being granted an account
+  on it. Keep it that way: adding a draft field to a platform response breaks the promise
+  the portal makes on screen.
 - **Authentication is not optional.** Everything under `/api` needs a session cookie
   except `/api/health` and `/api/auth/*`. Sockets verify the same cookie in `io.use()`.
   A write also re-checks the business in its own `WHERE … AND business_id = ANY($n)`, so
@@ -107,8 +127,11 @@ the realtime path depends on triggers.
 
 ## Known gaps (good next tasks)
 
-- Roles are stored (`owner` / `reviewer`) but not enforced — both can approve, reject and
-  pause. Enforce them when someone needs read-only access.
+- A suspended business disappears from its own dashboard but its agents keep whatever
+  status they had, and n8n can still check them out through `/api/internal/*`. Gate the
+  internal routes on `businesses.is_active` when that starts to matter.
+- The Messenger workflow answers one page, chosen by `META_BUSINESS_CODE`. Routing several
+  pages to several businesses needs a page-id lookup rather than an env var.
 - No password reset for the user: `scripts/reset-password.js` is the only route, and there
   is no email sending anywhere in the stack.
 - The sign-in throttle lives in one backend process's memory. Run more than one instance

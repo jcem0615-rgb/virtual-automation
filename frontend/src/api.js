@@ -46,6 +46,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ feedback }),
     }),
+  platform: {
+    overview: () => request('/api/platform/overview'),
+    addBusiness: (body) =>
+      request('/api/platform/businesses', { method: 'POST', body: JSON.stringify(body) }),
+    setActive: (id, isActive) =>
+      request(`/api/platform/businesses/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ is_active: isActive }),
+      }),
+    users: () => request('/api/platform/users'),
+    addUser: (body) =>
+      request('/api/platform/users', { method: 'POST', body: JSON.stringify(body) }),
+  },
   kill: (agentId, resume) =>
     request(`/api/agents/${agentId}/kill`, {
       method: 'POST',

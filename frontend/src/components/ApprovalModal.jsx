@@ -9,7 +9,9 @@ const CHANNEL_LABEL = {
   shopee: 'Shopee',
 };
 
-export default function ApprovalModal({ agent, approval, onClose, onApprove, onReject, onKill }) {
+export default function ApprovalModal({
+  agent, approval, canPause = true, onClose, onApprove, onReject, onKill,
+}) {
   const [feedback, setFeedback] = useState('');
   const [rejecting, setRejecting] = useState(false);
   const [busy, setBusy] = useState(null);
@@ -179,17 +181,24 @@ export default function ApprovalModal({ agent, approval, onClose, onApprove, onR
 
           <span className="flex-1" />
 
-          <button
-            disabled={busy !== null}
-            onClick={() => run('kill', () => onKill(agent.id, paused))}
-            className={`rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 ${
-              paused
-                ? 'bg-slate-700 text-slate-100 hover:bg-slate-600'
-                : 'bg-red-700 text-white hover:bg-red-600'
-            }`}
-          >
-            {busy === 'kill' ? '…' : paused ? 'Resume agent' : 'Emergency pause'}
-          </button>
+          {canPause ? (
+            <button
+              disabled={busy !== null}
+              onClick={() => run('kill', () => onKill(agent.id, paused))}
+              className={`rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 ${
+                paused
+                  ? 'bg-slate-700 text-slate-100 hover:bg-slate-600'
+                  : 'bg-red-700 text-white hover:bg-red-600'
+              }`}
+            >
+              {busy === 'kill' ? '…' : paused ? 'Resume agent' : 'Emergency pause'}
+            </button>
+          ) : (
+            // Reviewers decide on drafts; switching a desk off is the owner's call.
+            <p className="text-xs text-slate-500">
+              {paused ? 'An owner can resume this agent.' : 'An owner can pause this agent.'}
+            </p>
+          )}
         </footer>
       </div>
     </div>

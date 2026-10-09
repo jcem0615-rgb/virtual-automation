@@ -187,3 +187,50 @@ CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions (expires_at);
 -- The audit trail should name a person, not just the string 'dashboard'.
 ALTER TABLE action_logs ADD COLUMN IF NOT EXISTS actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE approvals   ADD COLUMN IF NOT EXISTS resolved_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+
+-- ------------------------------------------------------ platform operator
+-- The person who runs this deployment and sells it on. Distinct from a
+-- business `owner`: a platform operator can create and suspend businesses and
+-- watch them working, but is NOT a member of any of them, so none of the
+-- tenant-scoped reads below ever return their rows. Access to a floor comes
+-- only from a user_businesses grant, like it does for anyone else.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_platform_owner boolean NOT NULL DEFAULT false;
+
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS business_type text NOT NULL DEFAULT 'general';
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS is_active boolean NOT NULL DEFAULT true;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES users(id) ON DELETE SET NULL;
+
+-- ---------------------------------------------------- provisioning a floor
+-- The nine desks every business gets, and where they sit on the canvas.
+-- seed.sql and the platform API both go through this, so a floor created from
+-- the portal is laid out exactly like the seeded ones.
+CREATE OR REPLACE FUNCTION provision_business_agents(p_business_id uuid)
+RETURNS integer AS $fn$
+DECLARE
+  inserted integer;
+BEGIN
+  WITH roster (department, role_title, sprite, desk_x, desk_y) AS (
+    VALUES
+      ('Sales',      'Sales Agent',        'staff_amber',  160, 300),
+      ('Marketing',  'Marketing Agent',    'staff_rose',   480, 300),
+      ('CRM',        'Customer Care Agent','staff_sky',    800, 300),
+      ('Inventory',  'Inventory Agent',    'staff_lime',   160, 450),
+      ('HR',         'People Agent',       'staff_violet', 480, 450),
+      ('Admin',      'Admin Agent',        'staff_slate',  800, 450),
+      ('Logistics',  'Dispatch Agent',     'staff_teal',   160, 600),
+      ('Security',   'Security Agent',     'staff_red',    480, 600),
+      ('Production', 'Operations Agent',   'staff_orange', 800, 600)
+  )
+  INSERT INTO agents (business_id, department, name, role_title, avatar_sprite_key, desk_x, desk_y)
+  SELECT p_business_id, r.department, r.department || ' Agent', r.role_title,
+         r.sprite, r.desk_x, r.desk_y
+  FROM roster r
+  ON CONFLICT (business_id, department) DO UPDATE
+    SET role_title        = EXCLUDED.role_title,
+        avatar_sprite_key = EXCLUDED.avatar_sprite_key,
+        desk_x            = EXCLUDED.desk_x,
+        desk_y            = EXCLUDED.desk_y;
+  GET DIAGNOSTICS inserted = ROW_COUNT;
+  RETURN inserted;
+END;
+$fn$ LANGUAGE plpgsql;

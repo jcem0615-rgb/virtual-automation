@@ -7,6 +7,7 @@
 // user, and the businesses that user belongs to are the only scope any query
 // can run in. /api/internal/* is for n8n and carries a shared token instead.
 import http from 'node:http';
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import { Server as SocketServer } from 'socket.io';
@@ -18,6 +19,7 @@ import {
   COOKIE_NAME, readCookie, resolveSession, requireUser, scopeFor,
   authenticate, createSession, destroySession, setSessionCookie,
   clearSessionCookie, secretsMatch, purgeExpiredSessions,
+  roleFor, requireOwner, requirePlatformOwner, createUser, grantBusiness,
 } from './auth.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
@@ -265,18 +267,24 @@ app.get('/api/auth/me', wrap(async (req, res) => {
 }));
 
 function publicUser(user) {
-  return { id: user.id, email: user.email, displayName: user.displayName };
+  return {
+    id: user.id,
+    email: user.email,
+    displayName: user.displayName,
+    isPlatformOwner: user.isPlatformOwner === true,
+    roles: user.roles ?? {},
+  };
 }
 
 async function readBusinesses(user) {
   // The tenant key on this table is `id`, not `business_id`.
   const where = businessClause(user.businessIds ?? [], { column: 'id' });
   const { rows } = await q(
-    `SELECT id, code, name, timezone, currency FROM businesses
-      WHERE ${where.sql} ORDER BY name`,
+    `SELECT id, code, name, business_type, timezone, currency FROM businesses
+      WHERE ${where.sql} AND is_active ORDER BY name`,
     where.params,
   );
-  return rows;
+  return rows.map((b) => ({ ...b, role: roleFor(user, b.id) }));
 }
 
 // Everything below needs a session.
@@ -464,6 +472,12 @@ app.post('/api/agents/:id/kill', wrap(async (req, res) => {
   const resume = req.body?.resume === true;
   const user = req.user;
 
+  // Reviewers decide on drafts; only an owner switches a desk off. Checked
+  // against the agent's own business, before anything is written.
+  const existing = await readAgent(agentId);
+  if (!existing) throw new HttpError(404, 'agent not found');
+  requireOwner(user, existing.business_id);
+
   const agent = await tx(async (client) => {
     const { rows } = resume
       ? await client.query(
@@ -489,13 +503,167 @@ app.post('/api/agents/:id/kill', wrap(async (req, res) => {
   });
 
   if (!agent) {
-    const existing = await readAgent(agentId);
-    if (!existing) throw new HttpError(404, 'agent not found');
-    assertInScope(user, existing.business_id);
     throw new HttpError(409, resume ? 'agent is not paused' : 'agent could not be paused',
       { status: existing.status });
   }
   res.json({ ok: true, agent });
+}));
+
+
+// ---------------------------------------------------------- platform API
+// For whoever runs this deployment and sells it on. The hard rule here is
+// that a platform operator sees ACTIVITY, never CONTENT: no draft text, no
+// payload, no feedback, no customer names. Those columns are not selected
+// anywhere below. Reading a business's actual work needs a user_businesses
+// grant from that business, like it does for anybody else.
+
+app.use('/api/platform', requirePlatformOwner);
+
+const BUSINESS_TYPES = [
+  'electrical', 'it_services', 'retail', 'food', 'construction',
+  'logistics', 'professional_services', 'general',
+];
+
+app.get('/api/platform/overview', wrap(async (_req, res) => {
+  const { rows: businesses } = await q(
+    `SELECT b.id, b.code, b.name, b.business_type, b.timezone, b.currency,
+            b.is_active, b.created_at,
+            (SELECT count(*) FROM agents a WHERE a.business_id = b.id) AS agent_count,
+            (SELECT count(*) FROM user_businesses ub WHERE ub.business_id = b.id) AS member_count
+       FROM businesses b
+      ORDER BY b.created_at`,
+  );
+
+  // The desk grid: department and status only, which is configuration rather
+  // than anyone's customer data.
+  const { rows: desks } = await q(
+    `SELECT business_id, department, status, desk_x, desk_y FROM agents
+      ORDER BY business_id, desk_y, desk_x`,
+  );
+
+  const { rows: counts } = await q(
+    `SELECT business_id,
+            count(*) FILTER (WHERE status = 'PENDING') AS pending,
+            count(*) FILTER (WHERE status = 'APPROVED'
+                             AND resolved_at > now() - interval '24 hours') AS approved_24h,
+            count(*) FILTER (WHERE status = 'REJECTED'
+                             AND resolved_at > now() - interval '24 hours') AS rejected_24h,
+            max(created_at) AS last_draft_at
+       FROM approvals GROUP BY business_id`,
+  );
+
+  const { rows: activity } = await q(
+    `SELECT business_id, max(created_at) AS last_action_at,
+            count(*) FILTER (WHERE created_at > now() - interval '24 hours') AS actions_24h
+       FROM action_logs GROUP BY business_id`,
+  );
+
+  const byId = (rows) => Object.fromEntries(rows.map((r) => [r.business_id, r]));
+  const countsById = byId(counts);
+  const activityById = byId(activity);
+
+  res.json({
+    businessTypes: BUSINESS_TYPES,
+    businesses: businesses.map((b) => ({
+      ...b,
+      agent_count: Number(b.agent_count),
+      member_count: Number(b.member_count),
+      desks: desks.filter((d) => d.business_id === b.id)
+        .map(({ department, status }) => ({ department, status })),
+      pending: Number(countsById[b.id]?.pending ?? 0),
+      approved_24h: Number(countsById[b.id]?.approved_24h ?? 0),
+      rejected_24h: Number(countsById[b.id]?.rejected_24h ?? 0),
+      last_draft_at: countsById[b.id]?.last_draft_at ?? null,
+      last_action_at: activityById[b.id]?.last_action_at ?? null,
+      actions_24h: Number(activityById[b.id]?.actions_24h ?? 0),
+    })),
+  });
+}));
+
+/** Open a new floor: the business plus its nine desks, laid out as usual. */
+app.post('/api/platform/businesses', wrap(async (req, res) => {
+  const code = String(req.body?.code ?? '').trim().toUpperCase();
+  const name = String(req.body?.name ?? '').trim();
+  const businessType = String(req.body?.business_type ?? 'general');
+  const timezone = String(req.body?.timezone ?? 'Asia/Manila');
+  const currency = String(req.body?.currency ?? 'PHP').toUpperCase();
+
+  if (!/^[A-Z][A-Z0-9_]{2,31}$/.test(code)) {
+    throw new HttpError(400, 'code must be 3-32 characters: A-Z, 0-9 and underscore');
+  }
+  if (name.length < 2) throw new HttpError(400, 'name is required');
+  if (!BUSINESS_TYPES.includes(businessType)) throw new HttpError(400, 'unknown business type');
+  if (!/^[A-Z]{3}$/.test(currency)) throw new HttpError(400, 'currency must be a 3-letter code');
+
+  const business = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO businesses (code, name, business_type, timezone, currency, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, code, name, business_type, timezone, currency, is_active, created_at`,
+      [code, name, businessType, timezone, currency, req.user.id],
+    );
+    await client.query('SELECT provision_business_agents($1)', [rows[0].id]);
+    return rows[0];
+  }).catch((err) => {
+    if (err.code === '23505') throw new HttpError(409, `a business already uses the code ${code}`);
+    throw err;
+  });
+
+  res.status(201).json({ ok: true, business });
+}));
+
+/** Suspend or restore a floor. Suspended businesses disappear from their own
+ *  dashboards but nothing is deleted. */
+app.patch('/api/platform/businesses/:id', wrap(async (req, res) => {
+  const id = assertUuid(req.params.id, 'business_id');
+  if (typeof req.body?.is_active !== 'boolean') {
+    throw new HttpError(400, 'is_active must be true or false');
+  }
+  const { rows } = await q(
+    `UPDATE businesses SET is_active = $2 WHERE id = $1
+     RETURNING id, code, name, is_active`,
+    [id, req.body.is_active],
+  );
+  if (!rows[0]) throw new HttpError(404, 'business not found');
+  res.json({ ok: true, business: rows[0] });
+}));
+
+/** Accounts, so a new customer can be handed their own sign-in. */
+app.get('/api/platform/users', wrap(async (_req, res) => {
+  const { rows } = await q(
+    `SELECT u.id, u.email, u.display_name, u.is_active, u.is_platform_owner,
+            u.created_at, u.last_login_at,
+            COALESCE(json_agg(json_build_object('code', b.code, 'role', ub.role)
+                     ORDER BY b.code) FILTER (WHERE b.id IS NOT NULL), '[]') AS access
+       FROM users u
+  LEFT JOIN user_businesses ub ON ub.user_id = u.id
+  LEFT JOIN businesses b ON b.id = ub.business_id
+   GROUP BY u.id
+   ORDER BY u.created_at`,
+  );
+  res.json(rows);
+}));
+
+app.post('/api/platform/users', wrap(async (req, res) => {
+  const businessId = assertUuid(req.body?.business_id, 'business_id');
+  const role = req.body?.role ?? 'owner';
+  if (!['owner', 'reviewer'].includes(role)) throw new HttpError(400, 'role must be owner or reviewer');
+
+  // Generated here rather than chosen, so a password is never typed into the
+  // portal and never travels in a request body.
+  const password = crypto.randomBytes(12).toString('base64url');
+  const user = await createUser({
+    email: req.body?.email,
+    password,
+    displayName: req.body?.display_name,
+  }).catch((err) => {
+    if (err.code === '23505') throw new HttpError(409, 'an account already uses that email');
+    throw err;
+  });
+  await grantBusiness(user.id, businessId, role);
+
+  // The only time this password is ever readable.
+  res.status(201).json({ ok: true, user, password });
 }));
 
 // ---------------------------------------------------------- internal REST
