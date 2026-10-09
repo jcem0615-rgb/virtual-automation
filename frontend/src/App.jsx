@@ -11,6 +11,10 @@ import ControlRoom from './ControlRoom.jsx';
 import PostsPanel from './components/PostsPanel.jsx';
 import ProductsPanel from './components/ProductsPanel.jsx';
 import AccountsPanel from './components/AccountsPanel.jsx';
+import InboxPanel from './components/InboxPanel.jsx';
+import SalesPanel from './components/SalesPanel.jsx';
+import LivePanel from './components/LivePanel.jsx';
+import NewOfficeDialog from './components/NewOfficeDialog.jsx';
 
 const STATUS_PILL = {
   IDLE: 'bg-slate-800 text-slate-300',
@@ -35,6 +39,11 @@ export default function App() {
   const [connection, setConnection] = useState('connecting');
   const [selectedAgentId, setSelectedAgentId] = useState(null);
   const [error, setError] = useState(null);
+  const [opening, setOpening] = useState(false);
+  // Bumped whenever a row anywhere in a collection changes, so the panels that
+  // read their own data know to look again. The socket says which collection
+  // moved; the panel refetches and gets the committed row, never a guess.
+  const [changed, setChanged] = useState(0);
 
   const socketRef = useRef(null);
   const businessRef = useRef(businessId);
@@ -128,6 +137,9 @@ export default function App() {
       setLogs((current) => [log, ...current].slice(0, 60));
     });
 
+    // A post, a product, a conversation, an order, a payment, a live room.
+    socket.on('collection:changed', () => setChanged((n) => n + 1));
+
     return () => { socket.close(); socketRef.current = null; };
   }, [onFloor, load, signedOut]);
 
@@ -142,6 +154,21 @@ export default function App() {
     }
     return map;
   }, [approvals]);
+
+  // Owning a floor anywhere is what lets this account open another one.
+  const ownsSomething = businesses.some((b) => (user?.roles?.[b.id] ?? b.role) === 'owner');
+  const isOwnerHere = businessId !== 'all'
+    && (user?.roles?.[businessId] ?? null) === 'owner';
+
+  // The canvas draws one office. Every floor is laid out at the same desk
+  // coordinates — that is the point of provisioning them identically — so
+  // drawing two at once would stand one business's staff inside another's.
+  // On the all-businesses view it shows the first floor and offers the rest.
+  const floorId = businessId === 'all' ? (businesses[0]?.id ?? null) : businessId;
+  const floorAgents = useMemo(
+    () => agents.filter((a) => a.business_id === floorId),
+    [agents, floorId],
+  );
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
   const selectedApproval = selectedAgentId ? pendingByAgent.get(selectedAgentId) ?? null : null;
@@ -217,14 +244,24 @@ export default function App() {
           <label className="flex items-center gap-2 text-sm text-slate-400">
             Business
             <select
+              id="biz"
               value={businessId}
-              onChange={(e) => { setSelectedAgentId(null); setBusinessId(e.target.value); }}
+              onChange={(e) => {
+                // Opening an office is not a filter, so it is handled here and
+                // the dropdown snaps back to whatever was showing.
+                if (e.target.value === '__new') { setOpening(true); return; }
+                setSelectedAgentId(null);
+                setBusinessId(e.target.value);
+              }}
               className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-100 outline-none focus:border-sky-500"
             >
               {businesses.length > 1 && <option value="all">All businesses</option>}
               {businesses.map((b) => (
                 <option key={b.id} value={b.id}>{b.name}</option>
               ))}
+              {/* An owner of one office can start another: a different line of
+                  business, its own floor, its own data. */}
+              {ownsSomething && <option value="__new">+ Open another office…</option>}
             </select>
           </label>
 
@@ -269,7 +306,39 @@ export default function App() {
           page could never narrow again. */}
       <main className="mx-auto grid max-w-7xl grid-cols-1 gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_340px]">
         <section className="min-w-0 space-y-4">
-          <VirtualOfficeCanvas agents={agents} onSelectAgent={(a) => setSelectedAgentId(a.id)} />
+          <div className="min-w-0 space-y-2">
+            {businessId === 'all' && businesses.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-slate-500">Floor</span>
+                {businesses.map((b) => (
+                  <button
+                    key={b.id}
+                    onClick={() => { setSelectedAgentId(null); setBusinessId(b.id); }}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] ${
+                      b.id === floorId
+                        ? 'border-sky-700 bg-sky-950 text-sky-300'
+                        : 'border-slate-700 text-slate-400 hover:bg-slate-800'
+                    }`}
+                  >
+                    {b.name}
+                  </button>
+                ))}
+                <span className="text-[11px] text-slate-600">
+                  one office at a time — the queue below covers all of them
+                </span>
+              </div>
+            )}
+            <VirtualOfficeCanvas
+              agents={floorAgents}
+              onSelectAgent={(a) => setSelectedAgentId(a.id)}
+            />
+          </div>
+
+          <InboxPanel
+            businessId={businessId}
+            refreshKey={changed}
+            onSignedOut={signedOut}
+          />
 
           <PostsPanel
             businessId={businessId}
@@ -277,14 +346,30 @@ export default function App() {
             onSignedOut={signedOut}
           />
 
-          {/* Products and the shops they go on only make sense inside one
-              business, so they are hidden on the all-businesses view. */}
+          {/* Products, shops, sales and a live stream only make sense inside
+              one business, so they are hidden on the all-businesses view. */}
           {businessId !== 'all' && (
             <>
-              <ProductsPanel businessId={businessId} onSignedOut={signedOut} />
+              <SalesPanel
+                businessId={businessId}
+                isOwner={isOwnerHere}
+                refreshKey={changed}
+                onSignedOut={signedOut}
+              />
+              <LivePanel
+                businessId={businessId}
+                isOwner={isOwnerHere}
+                refreshKey={changed}
+                onSignedOut={signedOut}
+              />
+              <ProductsPanel
+                businessId={businessId}
+                isOwner={isOwnerHere}
+                onSignedOut={signedOut}
+              />
               <AccountsPanel
                 businessId={businessId}
-                isOwner={(user.roles?.[businessId] ?? null) === 'owner'}
+                isOwner={isOwnerHere}
                 onSignedOut={signedOut}
               />
             </>
@@ -361,6 +446,26 @@ export default function App() {
           </div>
         </aside>
       </main>
+
+      {opening && (
+        <NewOfficeDialog
+          onClose={() => setOpening(false)}
+          onOpened={(business) => {
+            setOpening(false);
+            // REST picks the new floor up straight away, but the socket joined
+            // its rooms when it connected and knows nothing of it — so it is
+            // reconnected rather than left half-subscribed.
+            setBusinesses((current) => [...current, business]
+              .sort((a, b) => a.name.localeCompare(b.name)));
+            setSelectedAgentId(null);
+            setBusinessId(business.id);
+            socketRef.current?.disconnect();
+            socketRef.current?.connect();
+            api.me().then((me) => { setUser(me.user); setBusinesses(me.businesses); })
+              .catch(() => {});
+          }}
+        />
+      )}
 
       {selectedAgent && (
         <ApprovalModal

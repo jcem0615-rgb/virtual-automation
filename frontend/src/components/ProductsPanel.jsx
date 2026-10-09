@@ -35,11 +35,14 @@ const BLANK = {
   weight_kg: '0.5', images: '', category_shopee: '', category_lazada: '', category_tiktok: '',
 };
 
-export default function ProductsPanel({ businessId, onSignedOut }) {
+export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
   const [data, setData] = useState(null);
   const [filter, setFilter] = useState({ platform: 'all', accountId: null });
   const [form, setForm] = useState(BLANK);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);       // product id
+  const [edit, setEdit] = useState({ price: '', stock: '' });
+  const [confirming, setConfirming] = useState(null); // product id
   const [choosing, setChoosing] = useState(null);     // product id
   const [chosen, setChosen] = useState([]);           // account ids
   const [busy, setBusy] = useState(false);
@@ -86,6 +89,53 @@ export default function ProductsPanel({ businessId, onSignedOut }) {
       });
       setForm(BLANK);
       setAdding(false);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Price and stock. If the product is live on a shop, changing either is
+  // something those shops have to be told, so the backend files it for
+  // approval and the shop sits at "updating" until a human says yes.
+  const save = async (product) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const patch = {};
+      if (edit.price !== '' && Number(edit.price) !== Number(product.price)) {
+        patch.price = Number(edit.price);
+      }
+      if (edit.stock !== '' && Number(edit.stock) !== Number(product.stock)) {
+        patch.stock = Number(edit.stock);
+      }
+      if (!Object.keys(patch).length) { setEditing(null); return; }
+      const result = await api.editProduct(product.id, patch);
+      setEditing(null);
+      setNote(result.needs_approval
+        ? `Saved here. ${product.listings.filter((l) => l.state !== 'NOT_LISTED').length} `
+          + 'shop(s) get the new figures once it is approved.'
+        : 'Saved. It is not listed anywhere yet, so nothing had to be told.');
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (product) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.deleteProduct(product.id);
+      setConfirming(null);
+      setNote(result.deleted
+        ? `${product.name} is gone.`
+        : `It comes down from ${product.listings.filter((l) => l.state !== 'NOT_LISTED').length} `
+          + 'shop(s) first. Approve that and it is deleted when they confirm.');
       await load();
     } catch (err) {
       setError(err.message);
@@ -193,21 +243,116 @@ export default function ProductsPanel({ businessId, onSignedOut }) {
                     ))}
                   </div>
                 </div>
-                {choosing !== product.id && sellable.length > 0 && (
-                  <button
-                    onClick={() => {
-                      setChoosing(product.id);
-                      setChosen(product.listings
-                        .filter((l) => l.state === 'LISTED')
-                        .map((l) => l.account_id));
-                      setNote(null);
-                    }}
-                    className="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
-                  >
-                    Choose shops
-                  </button>
-                )}
+                <div className="flex shrink-0 flex-wrap gap-1.5">
+                  {/* The catalogue is the owner's to write: what it sells and
+                      what it sells it for. A reviewer sees all of it. */}
+                  {isOwner && editing !== product.id && (
+                    <button
+                      onClick={() => {
+                        setEditing(product.id);
+                        setConfirming(null);
+                        setEdit({ price: String(product.price), stock: String(product.stock) });
+                        setNote(null);
+                      }}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+                    >
+                      Price &amp; stock
+                    </button>
+                  )}
+                  {choosing !== product.id && sellable.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setChoosing(product.id);
+                        setChosen(product.listings
+                          .filter((l) => l.state === 'LISTED')
+                          .map((l) => l.account_id));
+                        setNote(null);
+                      }}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+                    >
+                      Choose shops
+                    </button>
+                  )}
+                  {isOwner && confirming !== product.id && (
+                    <button
+                      onClick={() => { setConfirming(product.id); setEditing(null); setNote(null); }}
+                      className="rounded-lg border border-red-900 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950/60"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
               </div>
+
+              {editing === product.id && (
+                <div className="mt-3 space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="text-slate-400">Price ({product.currency})</span>
+                      <input
+                        id={`pr-price-${product.id}`}
+                        type="number" min="0" step="0.01" value={edit.price}
+                        onChange={(e) => setEdit({ ...edit, price: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-sky-500" />
+                    </label>
+                    <label className="block text-sm">
+                      <span className="text-slate-400">Stock</span>
+                      <input
+                        id={`pr-stock-${product.id}`}
+                        type="number" min="0" value={edit.stock}
+                        onChange={(e) => setEdit({ ...edit, stock: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-sky-500" />
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      disabled={busy}
+                      onClick={() => save(product)}
+                      className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                    >
+                      {busy ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      onClick={() => setEditing(null)}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
+                    >
+                      Cancel
+                    </button>
+                    <span className="self-center text-xs text-slate-500">
+                      {product.listings.some((l) => l.state !== 'NOT_LISTED')
+                        ? 'It is live somewhere, so the new figures wait for approval before the shops are told.'
+                        : 'It is not listed anywhere yet, so this saves straight away.'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {confirming === product.id && (
+                <div className="mt-3 space-y-3 rounded-lg border border-red-900/60 bg-red-950/30 p-3">
+                  <p className="text-xs text-red-200">
+                    Delete {product.name}?{' '}
+                    {product.listings.some((l) => l.state !== 'NOT_LISTED')
+                      ? 'It is live on a shop, so it comes down there first — that waits for approval, '
+                        + 'and the product is deleted here once every shop has confirmed.'
+                      : 'It is not listed anywhere, so it goes now.'}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      disabled={busy}
+                      onClick={() => remove(product)}
+                      className="rounded-lg bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50"
+                    >
+                      {busy ? 'Working…' : 'Yes, delete it'}
+                    </button>
+                    <button
+                      onClick={() => setConfirming(null)}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
+                    >
+                      Keep it
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {choosing === product.id && (
                 <div className="mt-3 space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
@@ -262,7 +407,12 @@ export default function ProductsPanel({ businessId, onSignedOut }) {
       )}
 
       <div className="border-t border-slate-800 p-4">
-        {!adding ? (
+        {!isOwner ? (
+          <p className="text-xs text-slate-500">
+            The catalogue is the owner&rsquo;s to write. You can see every product and
+            every shop it is on, and you approve what goes out.
+          </p>
+        ) : !adding ? (
           <button
             onClick={() => setAdding(true)}
             className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"

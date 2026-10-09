@@ -10,7 +10,7 @@
 import { useEffect, useRef } from 'react';
 import Phaser from 'phaser';
 
-const WIDTH = 960;
+const WIDTH = 1100;
 const HEIGHT = 700;
 
 // avatar_sprite_key only selects a colour; the figures are drawn from primitives.
@@ -24,6 +24,7 @@ const SPRITE_COLOURS = {
   staff_teal: 0x2dd4bf,
   staff_red: 0xef4444,
   staff_orange: 0xfb923c,
+  staff_emerald: 0x34d399,
   staff_default: 0x64748b,
 };
 
@@ -60,8 +61,10 @@ const ARRIVE_RADIUS = 3;
 
 // The gaps between desk blocks. Anyone crossing the room walks an aisle
 // instead of straight over someone's desk.
-const AISLE_ROWS = [240, 375, 525];
-const AISLE_COLS = [320, 640];
+// The lanes people walk down, between the desk blocks rather than over
+// them. One above the front row, one between the two rows, one below.
+const AISLE_ROWS = [245, 450, 655];
+const AISLE_COLS = [230, 442, 654, 866];
 
 const DEPTH = { floor: 0, furniture: 1, people: 5, labels: 12 };
 
@@ -101,10 +104,10 @@ class OfficeScene extends Phaser.Scene {
       fontFamily: 'ui-monospace, monospace', fontSize: '14px', color: '#64748b',
     }).setDepth(DEPTH.labels);
 
-    this.drawLobby(40, 74, 400, 132);
-    this.drawPantry(520, 74, 400, 132);
-    this.drawWaterCooler(320, 430);
-    this.drawPrinter(640, 430);
+    this.drawLobby(40, 74, 470, 132);
+    this.drawPantry(590, 74, 470, 132);
+    this.drawWaterCooler(230, 450);
+    this.drawPrinter(866, 450);
   }
 
   zone(x, y, w, h, title, accent = 0x24334f) {

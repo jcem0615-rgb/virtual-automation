@@ -92,6 +92,65 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ account_ids: accountIds }),
     }),
+  deleteProduct: (id) => request(`/api/products/${id}`, { method: 'DELETE' }),
+
+  // The lines a new office can be opened for, and opening one.
+  businessLines: () => request('/api/business-lines'),
+  openOffice: (body) =>
+    request('/api/businesses', { method: 'POST', body: JSON.stringify(body) }),
+
+  // The inbox. Marketplace chat and DMs; there is no call anywhere, because
+  // none of these platforms has one.
+  inbox: (businessId, channel = 'all') => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (channel && channel !== 'all') params.set('channel', channel);
+    return request(`/api/inbox?${params}`);
+  },
+  thread: (id) => request(`/api/inbox/${id}`),
+  replyToThread: (id, draft) =>
+    request(`/api/inbox/${id}/reply`, { method: 'POST', body: JSON.stringify({ draft }) }),
+  closeThread: (id) => request(`/api/inbox/${id}/close`, { method: 'POST' }),
+
+  // Sales.
+  orders: (businessId, { status, accountId, source } = {}) => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (status && status !== 'all') params.set('status', status);
+    if (accountId) params.set('account_id', accountId);
+    if (source && source !== 'all') params.set('source', source);
+    return request(`/api/orders?${params}`);
+  },
+  moveOrder: (id, status) =>
+    request(`/api/orders/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  chaseOrder: (id) => request(`/api/orders/${id}/chase`, { method: 'POST' }),
+
+  // The money.
+  payments: (businessId) => request(`/api/payments${scope(businessId)}`),
+  payouts: (businessId) => request(`/api/payouts${scope(businessId)}`),
+  paymentRules: (businessId) => request(`/api/payment-rules${scope(businessId)}`),
+  editPaymentRule: (id, body) =>
+    request(`/api/payment-rules/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+  // Live selling.
+  live: (businessId, status = 'all') => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (status && status !== 'all') params.set('status', status);
+    return request(`/api/live?${params}`);
+  },
+  liveSession: (id) => request(`/api/live/${id}`),
+  bookLive: (body) => request('/api/live', { method: 'POST', body: JSON.stringify(body) }),
+  fillBasket: (id, items) =>
+    request(`/api/live/${id}/basket`, { method: 'POST', body: JSON.stringify({ items }) }),
+  armLive: (id, replyTemplate) =>
+    request(`/api/live/${id}/arm`, {
+      method: 'POST',
+      body: JSON.stringify(replyTemplate ? { reply_template: replyTemplate } : {}),
+    }),
+  pauseLive: (id, resume) =>
+    request(`/api/live/${id}/pause`, { method: 'POST', body: JSON.stringify({ resume }) }),
+  endLive: (id) => request(`/api/live/${id}/end`, { method: 'POST' }),
 
   platform: {
     overview: () => request('/api/platform/overview'),
