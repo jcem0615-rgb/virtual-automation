@@ -996,6 +996,86 @@ export function registerCommerce(app, ctx) {
     res.status(201).json({ ok: true, ...out });
   }));
 
+  /**
+   * The desk chasing an order by itself. Same gate as the human route — the
+   * nudge is filed, never sent — and the floor's own rule decides whether it
+   * is drafted at all and whether it is early.
+   */
+  app.post('/api/internal/orders/:id/chase', wrap(async (req, res) => {
+    const order = await readOrder(req.params.id);
+    if (!order) throw new HttpError(404, 'order not found');
+
+    const live = await internalGate(order.business_id);
+    if (live) { res.status(423).json(live); return; }
+    if (order.status !== 'UNPAID') {
+      res.json({ ok: true, filed: false, reason: 'that order is not waiting on payment' });
+      return;
+    }
+
+    const rule = await ruleFor(order.business_id,
+      order.source === 'live' ? 'live' : order.account_platform ?? 'shopee');
+    if (!rule.chase_needs_approval) {
+      // Switched off means the drafts are not made at all. It has never meant
+      // that they send themselves.
+      res.json({ ok: true, filed: false, reason: 'this floor does not chase unpaid orders' });
+      return;
+    }
+    const minutes = Math.round((Date.now() - new Date(order.placed_at).getTime()) / 60000);
+    if (minutes < rule.chase_unpaid_after_minutes) {
+      res.json({ ok: true, filed: false, reason: 'too early by this floor\u2019s rule' });
+      return;
+    }
+    // One nudge per order: a desk that files the same chase every poll is
+    // worse than one that files none.
+    const { rows: already } = await q(
+      `SELECT 1 FROM approvals
+        WHERE business_id = $1 AND payload_json->>'type' = 'payment_chase'
+          AND payload_json->>'order_id' = $2 AND status <> 'REJECTED'`,
+      [order.business_id, order.id]);
+    if (already[0]) { res.json({ ok: true, filed: false, reason: 'already chased' }); return; }
+
+    const agentId = await deskFor(order.business_id, 'Payments');
+    const items = (order.items ?? []).map((i) => `${i.qty}× ${i.name}`).join(', ');
+    const draft = String(req.body?.draft ?? '').trim()
+      || `Hi ${order.buyer_name}, your order ${order.order_no ?? order.external_id} `
+         + `(${items}) is still waiting for payment. `
+         + (order.checkout_url ? `You can pay here: ${order.checkout_url}. ` : '')
+         + `We will hold it a little longer and then release the stock.`;
+
+    const approval = await tx(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO approvals (business_id, agent_id, payload_json)
+         VALUES ($1,$2,$3::jsonb) RETURNING id`,
+        [order.business_id, agentId, JSON.stringify({
+          type: 'payment_chase',
+          title: `Chase unpaid order ${order.order_no ?? order.external_id}`,
+          draft,
+          channel: order.account_platform ? `${order.account_platform}_chat` : 'email',
+          recipient: order.buyer_name,
+          order_id: order.id,
+          account_id: order.account_id,
+          source: { order_id: order.id, requested_by: 'n8n' },
+        })],
+      );
+      await settleAgent(client, {
+        agentId,
+        businessId: order.business_id,
+        status: 'AWAITING_APPROVAL',
+        message: `Chase waiting: ${order.order_no ?? order.external_id}`.slice(0, 500),
+      });
+      await logAction(client, {
+        businessId: order.business_id,
+        agentId,
+        approvalId: rows[0].id,
+        action: 'PAYMENT_CHASE_SUBMITTED',
+        actor: 'n8n',
+        detail: { order_no: order.order_no ?? order.external_id, unpaid_minutes: minutes },
+      });
+      return rows[0];
+    });
+    res.status(201).json({ ok: true, filed: true, approval_id: approval.id });
+  }));
+
   // What the payments desk should be acting on right now: unpaid past the
   // chase mark, past the cancel mark, and escrow that should have landed.
   app.get('/api/internal/payments/due', wrap(async (req, res) => {

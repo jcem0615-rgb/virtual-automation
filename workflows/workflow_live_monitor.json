@@ -1,0 +1,1036 @@
+{
+  "name": "Live Selling → Basket, Monitor & Checkout",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "live-sync",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "d3000000-0000-4000-8000-000000000001",
+      "name": "Approved Live Work",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1180,
+        -260
+      ],
+      "notes": "Called by the backend after a live_pin or live_arm approval has moved PENDING -> APPROVED. Set N8N_LIVE_WEBHOOK_URL to this path.",
+      "webhookId": "live-sync"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.body.payload.type }}",
+                    "rightValue": "live_pin"
+                  }
+                ]
+              },
+              "outputKey": "live_pin"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.body.payload.type }}",
+                    "rightValue": "live_arm"
+                  }
+                ]
+              },
+              "outputKey": "live_arm"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000002",
+      "name": "Pin Or Arm",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -960,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// What a basket means depends entirely on the platform, and the difference is\n// not cosmetic:\n//\n//   TikTok   real. TikTok Shop attaches catalogue products to a LIVE room and\n//            the viewer taps the basket to buy without leaving the stream.\n//   Facebook gone. Meta ended Live Shopping product tagging on 1 October 2022\n//            (Instagram followed in March 2023). There is nothing to pin to.\n//            The list is the host's own running order and the comments are\n//            the till, which is what this workflow then reads.\nconst body = $input.first().json.body;\nconst session = body.session ?? {};\nconst basket = (session.basket ?? []).filter((b) => b.state === 'PIN_PENDING');\n\nif (session.platform !== 'tiktok') {\n  return basket.map((b) => ({ json: {\n    session_id: session.id, product_id: b.product_id, slot: b.slot,\n    // Not a failure: the item is on the host's list and claims against it\n    // work. It simply is not tappable, and the dashboard already says so.\n    state: 'PINNED', external_id: null, host_list_only: true,\n  } }));\n}\nreturn basket.map((b) => ({ json: {\n  session_id: session.id, business_id: session.business_id,\n  account_id: session.account_id, room_id: session.external_id,\n  product_id: b.product_id, slot: b.slot,\n  live_price: b.live_price ?? b.shelf_price, name: b.name,\n} }));\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000003",
+      "name": "Basket To Pin",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "method": "GET",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000004",
+      "name": "Live Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $('Basket To Pin').item.json.host_list_only === true }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d3000000-0000-4000-8000-000000000005",
+      "name": "Already Done?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -300,
+        -340
+      ],
+      "notes": "A Facebook basket needs no call: it is already reported as pinned, because the host reading it out is the whole mechanism."
+    },
+    {
+      "parameters": {
+        "jsCode": "// TikTok Shop: attach the product to the LIVE room's showcase. The id it hands\n// back is what the basket row stores, so the item can be taken down again.\nconst crypto = require('crypto');\nconst creds = $('Live Credentials').item.json.credentials;\nconst item = $('Basket To Pin').item.json;\nif (!creds?.access_token || !creds?.shop_cipher) {\n  return [{ json: { ...item, state: 'FAILED',\n    error: 'TIKTOK access_token or shop_cipher is not set for this shop' } }];\n}\nif (!item.room_id) {\n  return [{ json: { ...item, state: 'FAILED',\n    error: 'the stream is not up yet, so there is no room to pin to' } }];\n}\nconst host = creds.host || 'https://open-api.tiktokglobalshop.com';\nconst path = `/live/202309/rooms/${item.room_id}/products`;\nconst body = JSON.stringify({ product_id: String(item.product_id),\n                              display_order: item.slot });\nconst params = { app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n                 timestamp: String(Math.floor(Date.now() / 1000)), version: '202309' };\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst base = creds.app_secret + path + sorted + body + creds.app_secret;\nconst sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\nreturn [{ json: { ...item, url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n  payload: JSON.parse(body), access_token: creds.access_token } }];\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000006",
+      "name": "Pin On TikTok Live",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-tts-access-token",
+              "value": "={{ $json.access_token || \"\" }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload ?? {}) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000007",
+      "name": "Call TikTok",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        -400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $('Pin On TikTok Live').item.json;\nif (item.state === 'FAILED') return [{ json: item }];\nconst res = $input.item.json;\nconst body = res.body ?? res;\nconst ok = (res.statusCode ?? 200) < 400 && (body?.code ?? 0) === 0;\nreturn [{ json: {\n  session_id: item.session_id, product_id: item.product_id,\n  state: ok ? 'PINNED' : 'FAILED',\n  external_id: body?.data?.id ?? null,\n  error: ok ? null : (body?.message || `TikTok refused item ${item.slot}`),\n} }];\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000008",
+      "name": "Read Pin Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        380,
+        -400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/{{ $json.session_id }}/basket",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ items: [$json] }) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000009",
+      "name": "Report The Basket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        -340
+      ],
+      "notes": "An item the platform refused is reported FAILED with its reason, not skipped — a basket that quietly lost an item sells nothing and nobody finds out until the host calls for it."
+    },
+    {
+      "parameters": {
+        "jsCode": "// An armed session is one a human approved: they read the exact line the desk\n// will send a claimer and said yes to it. That approval is what the polling\n// lane below checks before it answers anybody.\nconst body = $input.first().json.body;\nconst session = body.session ?? {};\nreturn [{ json: { session_id: session.id, business_id: session.business_id,\n  platform: session.platform, armed: true } }];\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000010",
+      "name": "Start Watching",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/{{ $json.session_id }}/state",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: \"LIVE\", external_id: $env.LIVE_ROOM_ID || null }) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000011",
+      "name": "Tell The Floor It Is Live",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        -160
+      ],
+      "notes": "423 if nobody armed it or it was paused. The backend will not let a workflow put a session live that a human has not approved."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true }) }}",
+        "options": {}
+      },
+      "id": "d3000000-0000-4000-8000-000000000012",
+      "name": "Acknowledged",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        820,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 20
+            }
+          ]
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000013",
+      "name": "Every Twenty Seconds",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1180,
+        280
+      ],
+      "notes": "A live room moves fast. Twenty seconds is close enough to answer a claim while the host is still on the item, and slow enough not to spend the platform’s rate limit on an empty room."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/sessions?status=LIVE",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000014",
+      "name": "Rooms That Are Live",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only rooms a human armed and nobody has paused. The backend already filters\n// to LIVE, but it is cheap to be sure before spending a call on a room that\n// must not be answered.\nreturn ($input.first().json.sessions ?? [])\n  .filter((s) => s.status === 'LIVE' && s.armed)\n  .map((s) => ({ json: {\n    session_id: s.id, business_id: s.business_id, account_id: s.account_id,\n    platform: s.platform, room_id: s.external_id,\n    hold_minutes: s.hold_minutes,\n    slots: (s.basket ?? []).filter((b) => b.state === 'PINNED').map((b) => b.slot),\n  } }));\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000015",
+      "name": "One Room Each",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "method": "GET",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000016",
+      "name": "Room Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two numbers and a list of comments, from whichever API the platform has.\n//\n//   TikTok   live/202309/rooms/{id} carries viewers, likes and the basket\n//            taps — \"product clicks\" — which is the one metric Facebook has\n//            no equivalent for, because Facebook has no basket.\n//   Facebook the Live video node gives live_views and the comments edge. The\n//            comments are what matters: they are where the selling happens.\nconst crypto = require('crypto');\nconst creds = $('Room Credentials').item.json.credentials ?? {};\nconst item = $('One Room Each').item.json;\n\nif (!item.room_id) {\n  return [{ json: { ...item, skipped: true, error: 'no room id yet' } }];\n}\n\nif (item.platform === 'tiktok') {\n  if (!creds.access_token) {\n    return [{ json: { ...item, skipped: true, error: 'TIKTOK access_token is not set' } }];\n  }\n  const host = creds.host || 'https://open-api.tiktokglobalshop.com';\n  const path = `/live/202309/rooms/${item.room_id}`;\n  const params = { app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n                   timestamp: String(Math.floor(Date.now() / 1000)), version: '202309' };\n  const sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\n  const base = creds.app_secret + path + sorted + creds.app_secret;\n  const sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\n  return [{ json: { ...item,\n    url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n    access_token: creds.access_token } }];\n}\n\nif (!creds.page_access_token) {\n  return [{ json: { ...item, skipped: true, error: 'META page_access_token is not set' } }];\n}\nconst fields = 'live_views,status,comments.limit(50){from,message,created_time,id}';\nreturn [{ json: { ...item,\n  url: `https://graph.facebook.com/v21.0/${item.room_id}`\n     + `?fields=${encodeURIComponent(fields)}`\n     + `&access_token=${creds.page_access_token}` } }];\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000017",
+      "name": "Read The Room",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -300,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-tts-access-token",
+              "value": "={{ $json.access_token || \"\" }}"
+            }
+          ]
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000018",
+      "name": "Fetch The Room",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One metrics sample, and one item per comment that might be a purchase.\nconst item = $('One Room Each').item.json;\nconst body = $input.item.json;\nconst out = [];\n\nif (item.platform === 'tiktok') {\n  const d = body?.data ?? {};\n  out.push({ json: { kind: 'metrics', session_id: item.session_id,\n    viewers: Number(d.current_viewer_count ?? 0),\n    likes: Number(d.like_count ?? 0),\n    comments: Number(d.comment_count ?? 0),\n    basket_opens: Number(d.product_click_count ?? 0),\n    orders: Number(d.order_count ?? 0),\n    revenue: Number(d.gmv ?? 0) } });\n  for (const c of d.comments ?? []) {\n    out.push({ json: { kind: 'comment', session_id: item.session_id,\n      slots: item.slots, text: c.content,\n      buyer_name: c.nickname, buyer_handle: c.user_id } });\n  }\n} else {\n  out.push({ json: { kind: 'metrics', session_id: item.session_id,\n    viewers: Number(body?.live_views ?? 0),\n    likes: 0, comments: (body?.comments?.data ?? []).length,\n    // Facebook has no basket to open, so this stays at nought rather than\n    // being filled with a number that means something else.\n    basket_opens: 0, orders: 0, revenue: 0 } });\n  for (const c of body?.comments?.data ?? []) {\n    out.push({ json: { kind: 'comment', session_id: item.session_id,\n      slots: item.slots, text: c.message,\n      buyer_name: c.from?.name, buyer_handle: c.from?.id } });\n  }\n}\nreturn out;\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000019",
+      "name": "Split Numbers And Talk",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        140,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.kind }}",
+                    "rightValue": "metrics"
+                  }
+                ]
+              },
+              "outputKey": "metrics"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.kind }}",
+                    "rightValue": "comment"
+                  }
+                ]
+              },
+              "outputKey": "comment"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000020",
+      "name": "Metrics Or Comment",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        360,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/{{ $json.session_id }}/metrics",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000021",
+      "name": "Record The Sample",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        180
+      ],
+      "notes": "The monitor on the dashboard is drawn from these rows, so it survives the tab being closed — same rule as everything else here."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/{{ $json.session_id }}/comments",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text, buyer_name: $json.buyer_name, buyer_handle: $json.buyer_handle }) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000022",
+      "name": "Read It For Buy Intent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        380
+      ],
+      "notes": "The backend does the reading, holds the stock and hands back the one sentence a human approved. 423 means paused or not armed, and the comment is left alone."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.claimed === true }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d3000000-0000-4000-8000-000000000023",
+      "name": "Was It A Claim?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        800,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The link the claimer pays on. Nobody pays this app: on TikTok the cart is\n// the platform's own, and on Facebook — with Live Shopping gone — the seller\n// sends the buyer to their own checkout, which is why this falls back to\n// LIVE_CHECKOUT_BASE rather than pretending a Facebook basket exists.\nconst claim = $input.item.json;\nconst base = ($env.LIVE_CHECKOUT_BASE || '').replace(/\\/$/, '');\nif (!base) {\n  return [{ json: { ...claim, failed: true,\n    error: 'LIVE_CHECKOUT_BASE is not set, so there is no link to send' } }];\n}\nconst url = `${base}/${claim.claim_id}`;\nreturn [{ json: { ...claim, checkout_url: url,\n  // The blank the approved sentence was written around, filled in now and\n  // only now. Nothing else in the line is touched.\n  reply: String(claim.reply_template ?? '').replaceAll('{checkout_url}', url) } }];\n"
+      },
+      "id": "d3000000-0000-4000-8000-000000000024",
+      "name": "Make The Checkout",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1020,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.LIVE_REPLY_WEBHOOK_URL || ($env.BACKEND_URL + \"/api/health\") }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ session_id: $json.session_id, handle: $json.buyer_handle, text: $json.reply }) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000025",
+      "name": "Say It In The Room",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1240,
+        380
+      ],
+      "notes": "Where the line actually goes depends on the room: a TikTok Live reply, a Messenger DM, or a comment reply. Point LIVE_REPLY_WEBHOOK_URL at whichever sender you use; unset, it no-ops and the claim is still recorded with its link so the host can read it out."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/claims/{{ $('Make The Checkout').item.json.claim_id }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: \"CHECKOUT_SENT\", checkout_url: $('Make The Checkout').item.json.checkout_url }) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000026",
+      "name": "Record The Checkout",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1460,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "d3000000-0000-4000-8000-000000000027",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1180,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/expire-holds",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({}) }}"
+      },
+      "id": "d3000000-0000-4000-8000-000000000028",
+      "name": "Put Back What Was Not Paid",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        760
+      ],
+      "notes": "A hold nobody paid for goes back on the shelf, so the next viewer who asks can actually have it instead of being told it is gone by a ghost."
+    }
+  ],
+  "connections": {
+    "Approved Live Work": {
+      "main": [
+        [
+          {
+            "node": "Pin Or Arm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pin Or Arm": {
+      "main": [
+        [
+          {
+            "node": "Basket To Pin",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start Watching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basket To Pin": {
+      "main": [
+        [
+          {
+            "node": "Live Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Live Credentials": {
+      "main": [
+        [
+          {
+            "node": "Already Done?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Done?": {
+      "main": [
+        [
+          {
+            "node": "Report The Basket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pin On TikTok Live",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pin On TikTok Live": {
+      "main": [
+        [
+          {
+            "node": "Call TikTok",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call TikTok": {
+      "main": [
+        [
+          {
+            "node": "Read Pin Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Pin Result": {
+      "main": [
+        [
+          {
+            "node": "Report The Basket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report The Basket": {
+      "main": [
+        [
+          {
+            "node": "Acknowledged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Watching": {
+      "main": [
+        [
+          {
+            "node": "Tell The Floor It Is Live",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tell The Floor It Is Live": {
+      "main": [
+        [
+          {
+            "node": "Acknowledged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Twenty Seconds": {
+      "main": [
+        [
+          {
+            "node": "Rooms That Are Live",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rooms That Are Live": {
+      "main": [
+        [
+          {
+            "node": "One Room Each",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Room Each": {
+      "main": [
+        [
+          {
+            "node": "Room Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Room Credentials": {
+      "main": [
+        [
+          {
+            "node": "Read The Room",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read The Room": {
+      "main": [
+        [
+          {
+            "node": "Fetch The Room",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch The Room": {
+      "main": [
+        [
+          {
+            "node": "Split Numbers And Talk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Numbers And Talk": {
+      "main": [
+        [
+          {
+            "node": "Metrics Or Comment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Metrics Or Comment": {
+      "main": [
+        [
+          {
+            "node": "Record The Sample",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read It For Buy Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read It For Buy Intent": {
+      "main": [
+        [
+          {
+            "node": "Was It A Claim?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Was It A Claim?": {
+      "main": [
+        [
+          {
+            "node": "Make The Checkout",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Make The Checkout": {
+      "main": [
+        [
+          {
+            "node": "Say It In The Room",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Say It In The Room": {
+      "main": [
+        [
+          {
+            "node": "Record The Checkout",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Put Back What Was Not Paid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

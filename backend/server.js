@@ -2143,6 +2143,41 @@ app.post('/api/internal/posts', wrap(async (req, res) => {
  * internal token to get the keys for one account, and the read is logged, so
  * there is a record of every time a secret left the database.
  */
+/**
+ * Every connected account on every floor that is open, so a sweep can fan out
+ * without being told what exists. A suspended business is simply not in the
+ * list, which is how it stops being swept at all rather than being refused one
+ * call at a time.
+ *
+ * Credentials are not here — they come one account at a time from the route
+ * below, which logs each read.
+ */
+app.get('/api/internal/accounts', wrap(async (req, res) => {
+  const KINDS = {
+    chat: ['shopee', 'lazada', 'tiktok', 'facebook', 'instagram'],
+    market: ['shopee', 'lazada', 'tiktok'],
+    live: ['tiktok', 'facebook'],
+  };
+  const wanted = KINDS[String(req.query.kinds ?? '')] ?? PLATFORMS;
+  const { rows } = await q(
+    `SELECT a.id, a.business_id, a.platform, a.label, a.external_id, a.region,
+            a.sync_enabled, a.last_synced_at, b.code AS business_code
+       FROM platform_accounts a
+       JOIN businesses b ON b.id = a.business_id AND b.is_active
+      WHERE a.platform = ANY($1::text[])
+      ORDER BY b.code, a.platform, a.label`,
+    [wanted]);
+  res.json({ accounts: rows });
+}));
+
+/** The floors that are open, for a sweep that runs per business. */
+app.get('/api/internal/businesses', wrap(async (_req, res) => {
+  const { rows } = await q(
+    `SELECT id, code, name, business_type, timezone, currency
+       FROM businesses WHERE is_active ORDER BY code`);
+  res.json({ businesses: rows });
+}));
+
 app.get('/api/internal/accounts/:id/credentials', wrap(async (req, res) => {
   const accountId = assertUuid(req.params.id, 'account_id');
   const account = await readAccountRow(accountId);

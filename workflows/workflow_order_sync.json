@@ -1,0 +1,1055 @@
+{
+  "name": "Order & Payment Sync → Payments Desk",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000001",
+      "name": "Every Five Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1180,
+        -120
+      ],
+      "notes": "Orders, then the money behind them. They are two different events, days apart, so they are read separately and joined by order id."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts?kinds=market",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000002",
+      "name": "Selling Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const accounts = $input.first().json.accounts ?? [];\nreturn accounts\n  .filter((a) => ['shopee', 'lazada', 'tiktok'].includes(a.platform) && a.sync_enabled)\n  .map((a) => ({ json: {\n    business_id: a.business_id, account_id: a.id, platform: a.platform, label: a.label,\n    // Overlap the window on purpose. Every order is upserted on the\n    // marketplace's own id, so seeing one twice costs nothing and missing one\n    // costs a sale.\n    since: Math.floor((Date.now() - 15 * 60 * 1000) / 1000),\n    until: Math.floor(Date.now() / 1000),\n  } }));\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000003",
+      "name": "One Shop Each",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000004",
+      "name": "Shop Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "shopee"
+                  }
+                ]
+              },
+              "outputKey": "shopee"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "lazada"
+                  }
+                ]
+              },
+              "outputKey": "lazada"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "tiktok"
+                  }
+                ]
+              },
+              "outputKey": "tiktok"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000005",
+      "name": "Which Shop",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -300,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shopee: order/get_order_list with the detail fields asked for in one go,\n// including escrow, so the money comes back with the order rather than needing\n// a second signed call per order.\nconst crypto = require('crypto');\nconst creds = $('Shop Credentials').item.json.credentials;\nconst item = $('One Shop Each').item.json;\nconst host = creds.host || 'https://partner.shopeemobile.com';\nconst path = '/api/v2/order/get_order_list';\nconst ts = Math.floor(Date.now() / 1000);\nconst base = `${creds.partner_id}${path}${ts}${creds.access_token}${creds.shop_id}`;\nconst sign = crypto.createHmac('sha256', creds.partner_key).update(base).digest('hex');\nconst query = new URLSearchParams({\n  partner_id: String(creds.partner_id), timestamp: String(ts),\n  access_token: creds.access_token, shop_id: String(creds.shop_id), sign,\n  time_range_field: 'update_time', time_from: String(item.since), time_to: String(item.until),\n  page_size: '50', response_optional_fields: 'order_status,total_amount,buyer_username,item_list,payment_method',\n});\nreturn [{ json: { ...item, url: `${host}${path}?${query}`, vendor: 'shopee' } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000006",
+      "name": "Shopee Orders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lazada: /orders/get over the same window. Items come back on a second call\n// per order in Lazada's API; the normaliser below asks for them only when an\n// order is new to us, which keeps the call count sane.\nconst crypto = require('crypto');\nconst creds = $('Shop Credentials').item.json.credentials;\nconst item = $('One Shop Each').item.json;\nconst host = creds.host || 'https://api.lazada.com.ph/rest';\nconst path = '/orders/get';\nconst params = {\n  app_key: creds.app_key, access_token: creds.access_token,\n  timestamp: String(Date.now()), sign_method: 'sha256',\n  update_after: new Date(item.since * 1000).toISOString(),\n  limit: '50', sort_direction: 'DESC',\n};\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst sign = crypto.createHmac('sha256', creds.app_secret)\n  .update(path + sorted).digest('hex').toUpperCase();\nreturn [{ json: { ...item, url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n                  vendor: 'lazada' } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000007",
+      "name": "Lazada Orders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// TikTok Shop: order/202309/orders/search. A POST, so the body is part of the\n// signature too.\nconst crypto = require('crypto');\nconst creds = $('Shop Credentials').item.json.credentials;\nconst item = $('One Shop Each').item.json;\nconst host = creds.host || 'https://open-api.tiktokglobalshop.com';\nconst path = '/order/202309/orders/search';\nconst body = JSON.stringify({ update_time_ge: item.since, update_time_lt: item.until });\nconst params = { app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n                 timestamp: String(Math.floor(Date.now() / 1000)),\n                 version: '202309', page_size: '50' };\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst base = creds.app_secret + path + sorted + body + creds.app_secret;\nconst sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\nreturn [{ json: { ...item, url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n                  method: 'POST', payload: JSON.parse(body),\n                  access_token: creds.access_token, vendor: 'tiktok' } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000008",
+      "name": "TikTok Orders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $('One Shop Each').item.json;\nreturn [{ json: { ...item, skipped: true,\n  error: `No order reader is wired up for ${item.platform} yet.` } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000009",
+      "name": "Unwired Shop",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "={{ $json.method || \"GET\" }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-tts-access-token",
+              "value": "={{ $json.access_token || \"\" }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload ?? {}) }}"
+      },
+      "id": "d2000000-0000-4000-8000-000000000010",
+      "name": "Fetch Orders",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One shape for all three. The important part is what counts as paid, and the\n// three disagree about the words while agreeing about the substance:\n//\n//   Shopee   UNPAID -> READY_TO_SHIP -> SHIPPED -> COMPLETED\n//   Lazada   unpaid -> pending -> ready_to_ship -> shipped -> delivered\n//   TikTok   UNPAID -> AWAITING_SHIPMENT -> IN_TRANSIT -> DELIVERED\n//\n// Cash on delivery is a payment method, not a status: a COD order is shipped\n// while it is still unpaid, and only becomes money when the courier hands it\n// over. That is why the method is carried through rather than guessed from\n// the status.\nconst item = $('One Shop Each').item.json;\nconst body = $input.item.json;\nconst out = [];\n\nconst STATUS = {\n  UNPAID: 'UNPAID', TO_CONFIRM_RECEIVE: 'SHIPPED', READY_TO_SHIP: 'READY_TO_SHIP',\n  PROCESSED: 'READY_TO_SHIP', SHIPPED: 'SHIPPED', COMPLETED: 'DELIVERED',\n  CANCELLED: 'CANCELLED', INVOICE_PENDING: 'PAID',\n  unpaid: 'UNPAID', pending: 'PAID', packed: 'READY_TO_SHIP', ready_to_ship: 'READY_TO_SHIP',\n  shipped: 'SHIPPED', delivered: 'DELIVERED', canceled: 'CANCELLED', returned: 'RETURNED',\n  AWAITING_SHIPMENT: 'PAID', AWAITING_COLLECTION: 'READY_TO_SHIP',\n  IN_TRANSIT: 'SHIPPED', DELIVERED: 'DELIVERED', COMPLETE: 'DELIVERED',\n};\nconst method = (raw) => {\n  const text = String(raw ?? '').toLowerCase();\n  if (!text) return 'unknown';\n  if (text.includes('cod') || text.includes('cash on delivery')) return 'cod';\n  if (text.includes('wallet') || text.includes('gcash') || text.includes('paymaya')) return 'wallet';\n  if (text.includes('bank') || text.includes('transfer')) return 'bank_transfer';\n  if (text.includes('instal')) return 'installment';\n  return 'online';\n};\nconst push = (o) => out.push({ json: { business_id: item.business_id,\n  account_id: item.account_id, source: 'shop', ...o } });\n\nif (item.platform === 'shopee') {\n  for (const o of body?.response?.order_list ?? []) {\n    push({\n      external_id: String(o.order_sn), order_no: String(o.order_sn),\n      buyer_name: o.buyer_username ?? 'Buyer',\n      status: STATUS[o.order_status] ?? 'UNPAID',\n      total: Number(o.total_amount ?? 0), currency: o.currency ?? 'PHP',\n      placed_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,\n      payment: { method: method(o.payment_method),\n                 state: STATUS[o.order_status] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW' },\n      items: (o.item_list ?? []).map((i) => ({\n        sku: i.model_sku || i.item_sku, name: i.item_name,\n        qty: Number(i.model_quantity_purchased ?? 1),\n        unit_price: Number(i.model_discounted_price ?? i.model_original_price ?? 0) })),\n    });\n  }\n} else if (item.platform === 'lazada') {\n  for (const o of body?.data?.orders ?? []) {\n    const raw = Array.isArray(o.statuses) ? o.statuses[0] : o.statuses;\n    push({\n      external_id: String(o.order_id), order_no: String(o.order_number ?? o.order_id),\n      buyer_name: [o.customer_first_name, o.customer_last_name].filter(Boolean).join(' ') || 'Buyer',\n      status: STATUS[raw] ?? 'UNPAID',\n      total: Number(o.price ?? 0), currency: 'PHP',\n      placed_at: o.created_at ?? null,\n      payment: { method: method(o.payment_method),\n                 state: STATUS[raw] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW' },\n      // Lazada returns lines on /order/items/get; until that call is made the\n      // order is recorded without them rather than with invented ones.\n      items: [],\n    });\n  }\n} else if (item.platform === 'tiktok') {\n  for (const o of body?.data?.orders ?? []) {\n    push({\n      external_id: String(o.id), order_no: String(o.id),\n      buyer_name: o.recipient_address?.name ?? 'Buyer',\n      status: STATUS[o.status] ?? 'UNPAID',\n      total: Number(o.payment?.total_amount ?? 0),\n      currency: o.payment?.currency ?? 'PHP',\n      placed_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,\n      payment: {\n        method: o.payment_method_name ? method(o.payment_method_name) : 'online',\n        state: STATUS[o.status] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW',\n        gross: Number(o.payment?.sub_total ?? 0),\n        shipping_fee: Number(o.payment?.shipping_fee ?? 0),\n      },\n      items: (o.line_items ?? []).map((i) => ({\n        sku: i.seller_sku, name: i.product_name, qty: 1,\n        unit_price: Number(i.sale_price ?? 0) })),\n    });\n  }\n}\nreturn out;\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000011",
+      "name": "Normalise Orders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        380,
+        -120
+      ],
+      "notes": "A status nobody mapped falls back to UNPAID, which is the safe end: an order that is really paid will say so on the next sweep, whereas guessing PAID would ship a parcel against no money."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/orders",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "d2000000-0000-4000-8000-000000000012",
+      "name": "Record The Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        -120
+      ],
+      "notes": "The backend decides from the floor’s own rule whether this is the moment the stock leaves the shelf. 423 means the floor is suspended."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "17 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000013",
+      "name": "Every Morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1180,
+        420
+      ],
+      "notes": "Payouts settle overnight on all three. Reconciling them once a day is enough, and it keeps the signed call count down."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts?kinds=market",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000014",
+      "name": "Payout Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const accounts = $input.first().json.accounts ?? [];\nconst day = 24 * 60 * 60 * 1000;\nreturn accounts\n  .filter((a) => ['shopee', 'lazada', 'tiktok'].includes(a.platform) && a.sync_enabled)\n  .map((a) => ({ json: {\n    business_id: a.business_id, account_id: a.id, platform: a.platform,\n    from: new Date(Date.now() - 7 * day).toISOString().slice(0, 10),\n    to: new Date().toISOString().slice(0, 10),\n  } }));\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000015",
+      "name": "One Payout Each",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000016",
+      "name": "Payout Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "shopee"
+                  }
+                ]
+              },
+              "outputKey": "shopee"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "lazada"
+                  }
+                ]
+              },
+              "outputKey": "lazada"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "tiktok"
+                  }
+                ]
+              },
+              "outputKey": "tiktok"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000017",
+      "name": "Which Finance API",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -300,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shopee: payment/get_payout_detail. Escrow is released per order and then\n// paid out in a batch; this reads the batch and the orders inside it.\nconst crypto = require('crypto');\nconst creds = $('Payout Credentials').item.json.credentials;\nconst item = $('One Payout Each').item.json;\nconst host = creds.host || 'https://partner.shopeemobile.com';\nconst path = '/api/v2/payment/get_payout_detail';\nconst ts = Math.floor(Date.now() / 1000);\nconst base = `${creds.partner_id}${path}${ts}${creds.access_token}${creds.shop_id}`;\nconst sign = crypto.createHmac('sha256', creds.partner_key).update(base).digest('hex');\nconst query = new URLSearchParams({\n  partner_id: String(creds.partner_id), timestamp: String(ts),\n  access_token: creds.access_token, shop_id: String(creds.shop_id), sign,\n  payout_time_from: String(Math.floor(new Date(item.from).getTime() / 1000)),\n  payout_time_to: String(Math.floor(new Date(item.to).getTime() / 1000) + 86399),\n  page_size: '20' });\nreturn [{ json: { ...item, url: `${host}${path}?${query}`, vendor: 'shopee' } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000018",
+      "name": "Shopee Payouts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lazada: /finance/payout/status/get, which returns the statement periods and\n// what was transferred for each.\nconst crypto = require('crypto');\nconst creds = $('Payout Credentials').item.json.credentials;\nconst item = $('One Payout Each').item.json;\nconst host = creds.host || 'https://api.lazada.com.ph/rest';\nconst path = '/finance/payout/status/get';\nconst params = { app_key: creds.app_key, access_token: creds.access_token,\n                 timestamp: String(Date.now()), sign_method: 'sha256',\n                 created_after: item.from };\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst sign = crypto.createHmac('sha256', creds.app_secret)\n  .update(path + sorted).digest('hex').toUpperCase();\nreturn [{ json: { ...item, url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n                  vendor: 'lazada' } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000019",
+      "name": "Lazada Payouts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// TikTok Shop: finance/202309/statements, then the payments inside each.\nconst crypto = require('crypto');\nconst creds = $('Payout Credentials').item.json.credentials;\nconst item = $('One Payout Each').item.json;\nconst host = creds.host || 'https://open-api.tiktokglobalshop.com';\nconst path = '/finance/202309/statements';\nconst params = { app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n                 timestamp: String(Math.floor(Date.now() / 1000)), version: '202309',\n                 statement_time_ge: String(Math.floor(new Date(item.from).getTime() / 1000)),\n                 page_size: '20' };\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst base = creds.app_secret + path + sorted + creds.app_secret;\nconst sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\nreturn [{ json: { ...item, url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n                  access_token: creds.access_token, vendor: 'tiktok' } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000020",
+      "name": "TikTok Payouts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        580
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $('One Payout Each').item.json;\nreturn [{ json: { ...item, skipped: true,\n  error: `No payout reader is wired up for ${item.platform} yet.` } }];\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000021",
+      "name": "No Finance API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        740
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-tts-access-token",
+              "value": "={{ $json.access_token || \"\" }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000022",
+      "name": "Fetch Payouts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// What came in, and which orders the platform says are in it. The backend adds\n// up what those orders say they are worth and reports the difference; nothing\n// here tries to make the two agree.\nconst item = $('One Payout Each').item.json;\nconst body = $input.item.json;\nconst out = [];\nconst push = (p) => out.push({ json: { business_id: item.business_id,\n  account_id: item.account_id, currency: 'PHP', ...p } });\n\nif (item.platform === 'shopee') {\n  for (const p of body?.response?.payout_list ?? []) {\n    push({\n      external_id: String(p.payout_id ?? p.payout_time),\n      net: Number(p.payout_amount ?? 0),\n      gross: Number(p.total_amount ?? p.payout_amount ?? 0),\n      fees: Number(p.total_fee ?? 0),\n      settled_at: p.payout_time ? new Date(p.payout_time * 1000).toISOString() : null,\n      orders: (p.order_list ?? []).map((o) => ({\n        external_id: String(o.order_sn), amount: Number(o.escrow_amount ?? 0) })),\n    });\n  }\n} else if (item.platform === 'lazada') {\n  for (const p of body?.data ?? []) {\n    push({\n      external_id: String(p.statement_number ?? p.id),\n      net: Number(p.payout ?? 0), gross: Number(p.item_revenue ?? 0),\n      fees: Number(p.fees ?? 0), adjustments: Number(p.refunds ?? 0),\n      period_start: p.open_date ?? null, period_end: p.close_date ?? null,\n      settled_at: p.paid_date ?? null,\n      // Lazada's statement does not carry its order lines; without them the\n      // backend records the payout and says plainly that none matched, which\n      // is the truth rather than a clean-looking zero.\n      orders: [],\n    });\n  }\n} else if (item.platform === 'tiktok') {\n  for (const p of body?.data?.statements ?? []) {\n    push({\n      external_id: String(p.id),\n      net: Number(p.settlement_amount ?? 0),\n      gross: Number(p.revenue_amount ?? 0),\n      fees: Number(p.fee_amount ?? 0),\n      adjustments: Number(p.adjustment_amount ?? 0),\n      settled_at: p.statement_time\n        ? new Date(p.statement_time * 1000).toISOString() : null,\n      orders: [],\n    });\n  }\n}\nreturn out;\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000023",
+      "name": "Normalise Payouts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        380,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/payouts",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "d2000000-0000-4000-8000-000000000024",
+      "name": "Reconcile It",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        420
+      ],
+      "notes": "The backend compares the transfer against the orders in it and marks the payout SHORT with the figure if they disagree by more than the floor’s tolerance."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000025",
+      "name": "Every Half Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1180,
+        900
+      ],
+      "notes": "The Payment Collector’s round: orders that were placed and never paid for."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/businesses",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000026",
+      "name": "Floors To Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return ($input.first().json.businesses ?? []).map((b) => ({ json: { business_id: b.id } }));\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000027",
+      "name": "One Floor Each",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/payments/due?business_id={{ $json.business_id }}",
+        "method": "GET",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-000000000028",
+      "name": "What Is Overdue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        900
+      ],
+      "notes": "The floor’s own rule decides what counts as overdue: how long to wait before a nudge, and how long before the order is given up on."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only the ones inside the chasing window. An order past the cancel mark is\n// not nudged again — it is left for the owner to cancel, because cancelling\n// somebody's order is not a thing a bot should do on a timer.\nconst body = $input.item.json;\nreturn (body.chase ?? []).map((o) => ({ json: { order_id: o.id, order_no: o.order_no,\n  buyer: o.buyer_name, minutes_old: Math.round(Number(o.minutes_old)) } }));\n"
+      },
+      "id": "d2000000-0000-4000-8000-000000000029",
+      "name": "One Overdue Each",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -300,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/orders/{{ $json.order_id }}/chase",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({}) }}"
+      },
+      "id": "d2000000-0000-4000-8000-000000000030",
+      "name": "File A Nudge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        900
+      ],
+      "notes": "Filed for approval like every other line that reaches a customer, and only once per order however many times this runs."
+    }
+  ],
+  "connections": {
+    "Every Five Minutes": {
+      "main": [
+        [
+          {
+            "node": "Selling Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Selling Accounts": {
+      "main": [
+        [
+          {
+            "node": "One Shop Each",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Shop Each": {
+      "main": [
+        [
+          {
+            "node": "Shop Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shop Credentials": {
+      "main": [
+        [
+          {
+            "node": "Which Shop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Which Shop": {
+      "main": [
+        [
+          {
+            "node": "Shopee Orders",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lazada Orders",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "TikTok Orders",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unwired Shop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopee Orders": {
+      "main": [
+        [
+          {
+            "node": "Fetch Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lazada Orders": {
+      "main": [
+        [
+          {
+            "node": "Fetch Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TikTok Orders": {
+      "main": [
+        [
+          {
+            "node": "Fetch Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Orders": {
+      "main": [
+        [
+          {
+            "node": "Normalise Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Orders": {
+      "main": [
+        [
+          {
+            "node": "Record The Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Morning": {
+      "main": [
+        [
+          {
+            "node": "Payout Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Payout Accounts": {
+      "main": [
+        [
+          {
+            "node": "One Payout Each",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Payout Each": {
+      "main": [
+        [
+          {
+            "node": "Payout Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Payout Credentials": {
+      "main": [
+        [
+          {
+            "node": "Which Finance API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Which Finance API": {
+      "main": [
+        [
+          {
+            "node": "Shopee Payouts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lazada Payouts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "TikTok Payouts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Finance API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopee Payouts": {
+      "main": [
+        [
+          {
+            "node": "Fetch Payouts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lazada Payouts": {
+      "main": [
+        [
+          {
+            "node": "Fetch Payouts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TikTok Payouts": {
+      "main": [
+        [
+          {
+            "node": "Fetch Payouts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Payouts": {
+      "main": [
+        [
+          {
+            "node": "Normalise Payouts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Payouts": {
+      "main": [
+        [
+          {
+            "node": "Reconcile It",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Half Hour": {
+      "main": [
+        [
+          {
+            "node": "Floors To Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Floors To Check": {
+      "main": [
+        [
+          {
+            "node": "One Floor Each",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Floor Each": {
+      "main": [
+        [
+          {
+            "node": "What Is Overdue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "What Is Overdue": {
+      "main": [
+        [
+          {
+            "node": "One Overdue Each",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Overdue Each": {
+      "main": [
+        [
+          {
+            "node": "File A Nudge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

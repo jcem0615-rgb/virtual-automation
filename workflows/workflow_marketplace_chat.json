@@ -1,0 +1,1225 @@
+{
+  "name": "Marketplace Chat → CRM Draft → Approval → Reply",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000001",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1180,
+        -140
+      ],
+      "notes": "Shopee, Lazada and TikTok Shop have no chat webhook worth relying on, so the inbox is polled. None of the three has a voice-call API at all, which is why this workflow only ever deals in text."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts?kinds=chat",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000002",
+      "name": "Chat Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        -140
+      ],
+      "notes": "Every connected Shopee, Lazada, TikTok and Meta account on every active floor. A suspended floor is not in the list."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fan out: one item per account that can carry a buyer conversation. The\n// credentials are per account — two Shopee shops are two different shops —\n// so nothing below ever reuses another account's token.\nconst accounts = $input.first().json.accounts ?? [];\nconst CHAT = { shopee: 'shopee_chat', lazada: 'lazada_chat',\n               tiktok: 'tiktok_dm', facebook: 'meta_dm', instagram: 'instagram_dm' };\nreturn accounts\n  .filter((a) => CHAT[a.platform] && a.sync_enabled)\n  .map((a) => ({ json: {\n    business_id: a.business_id,\n    account_id: a.id,\n    platform: a.platform,\n    channel: CHAT[a.platform],\n    label: a.label,\n    // Only look as far back as the last sweep plus a minute of slack, so a\n    // long-running poll cannot miss a message that arrived mid-run.\n    since: new Date(Date.now() - 180000).toISOString(),\n  } }));\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000003",
+      "name": "One Account Each",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        -140
+      ],
+      "notes": "One item per account. A paused sync is skipped here rather than later, so a shop someone switched off is genuinely left alone."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000004",
+      "name": "Get Account Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        -140
+      ],
+      "notes": "Decrypted server-side and read only here. Every read is logged against the account, so a token that leaves the database leaves a trail."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "shopee"
+                  }
+                ]
+              },
+              "outputKey": "shopee"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "lazada"
+                  }
+                ]
+              },
+              "outputKey": "lazada"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.account.platform }}",
+                    "rightValue": "tiktok"
+                  }
+                ]
+              },
+              "outputKey": "tiktok"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000005",
+      "name": "Which Marketplace",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -300,
+        -140
+      ],
+      "notes": "Meta DMs keep their own workflow (workflow_messenger_inbound.json); anything else falls through to the honest refusal."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shopee: sellerchat/get_conversation_list, then get_message per unread\n// conversation. Signed over partner_id + path + timestamp + access_token +\n// shop_id, which is Shopee's v2 common signature.\nconst crypto = require('crypto');\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst item = $('One Account Each').item.json;\nconst host = creds.host || 'https://partner.shopeemobile.com';\nconst path = '/api/v2/sellerchat/get_conversation_list';\nconst ts = Math.floor(Date.now() / 1000);\nconst base = `${creds.partner_id}${path}${ts}${creds.access_token}${creds.shop_id}`;\nconst sign = crypto.createHmac('sha256', creds.partner_key).update(base).digest('hex');\nconst query = new URLSearchParams({\n  partner_id: String(creds.partner_id), timestamp: String(ts), access_token: creds.access_token,\n  shop_id: String(creds.shop_id), sign, direction: 'latest', type: 'all', page_size: '30',\n});\nreturn [{ json: { ...item, url: `${host}${path}?${query}`, vendor: 'shopee' } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000006",
+      "name": "Poll Shopee Chat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lazada: /im/message/list under the open platform's sorted-parameter\n// signature — app_secret, then every key and value in order, then app_secret.\nconst crypto = require('crypto');\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst item = $('One Account Each').item.json;\nconst host = creds.host || 'https://api.lazada.com.ph/rest';\nconst path = '/im/message/list';\nconst params = {\n  app_key: creds.app_key, access_token: creds.access_token,\n  timestamp: String(Date.now()), sign_method: 'sha256',\n  page_size: '30',\n};\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst sign = crypto.createHmac('sha256', creds.app_secret)\n  .update(path + sorted).digest('hex').toUpperCase();\nconst query = new URLSearchParams({ ...params, sign });\nreturn [{ json: { ...item, url: `${host}${path}?${query}`, vendor: 'lazada' } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000007",
+      "name": "Poll Lazada Chat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// TikTok Shop: customer_service/202309/conversations, signed over the sorted\n// query wrapped in the app secret.\nconst crypto = require('crypto');\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst item = $('One Account Each').item.json;\nconst host = creds.host || 'https://open-api.tiktokglobalshop.com';\nconst path = '/customer_service/202309/conversations';\nconst params = {\n  app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n  timestamp: String(Math.floor(Date.now() / 1000)), version: '202309', page_size: '30',\n};\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst base = creds.app_secret + path + sorted + creds.app_secret;\nconst sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\nconst query = new URLSearchParams({ ...params, sign });\nreturn [{ json: { ...item, url: `${host}${path}?${query}`,\n                  access_token: creds.access_token, vendor: 'tiktok' } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000008",
+      "name": "Poll TikTok Chat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// A channel nobody has written a poller for. Said out loud rather than\n// dropped, because an inbox that silently misses a buyer is worse than one\n// that admits it cannot read a platform.\nconst item = $('One Account Each').item.json;\nreturn [{ json: { ...item, skipped: true,\n  error: `No chat poller is wired up for ${item.platform} yet.` } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000009",
+      "name": "Unwired Channel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-tts-access-token",
+              "value": "={{ $json.access_token || \"\" }}"
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000010",
+      "name": "Fetch Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        -140
+      ],
+      "notes": "neverError, because a marketplace that is down must not take the whole sweep with it: the item carries on and the next account still runs."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Every marketplace shapes a conversation differently. Flatten them into the\n// one shape the inbox stores, keeping the marketplace's own thread id so a\n// reply goes back to the same conversation rather than opening a new one.\nconst item = $('One Account Each').item.json;\nconst body = $input.item.json;\nconst out = [];\n\nconst push = (external_id, buyer_name, buyer_handle, text, message_external_id) => {\n  const trimmed = String(text ?? '').trim();\n  if (!trimmed) return;\n  out.push({ json: {\n    business_id: item.business_id, account_id: item.account_id,\n    channel: item.channel, external_id: String(external_id),\n    buyer_name: buyer_name || 'Buyer', buyer_handle: buyer_handle || null,\n    body: trimmed.slice(0, 4000),\n    message_external_id: message_external_id ? String(message_external_id) : null,\n  } });\n};\n\nif (item.platform === 'shopee') {\n  for (const c of body?.response?.conversation ?? []) {\n    if (!c.unread_count) continue;\n    push(c.conversation_id, c.to_name, c.to_id, c.latest_message_content?.text, c.last_message_id);\n  }\n} else if (item.platform === 'lazada') {\n  for (const m of body?.data?.messages ?? []) {\n    if (m.from_account_type === 1) continue;   // 1 is the seller: our own line\n    push(m.session_id, m.from_nick_name, m.from_account_id, m.content?.txt, m.message_id);\n  }\n} else if (item.platform === 'tiktok') {\n  for (const c of body?.data?.conversations ?? []) {\n    const last = c.latest_message;\n    if (!last || last.sender?.role === 'SELLER') continue;\n    push(c.id, c.participants?.[0]?.nickname, c.participants?.[0]?.im_user_id,\n         last.content, last.id);\n  }\n}\nreturn out;\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000011",
+      "name": "Normalise Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        380,
+        -140
+      ],
+      "notes": "A message the seller sent is skipped on every platform, or the desk would answer itself in a loop."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/conversations",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000012",
+      "name": "File Inbound",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        -140
+      ],
+      "notes": "423 means the floor is suspended — the run stops there for that account."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              },
+              "leftValue": "={{ $json.statusCode ?? 200 }}",
+              "rightValue": 200
+            },
+            {
+              "id": "b",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ Boolean($json.conversation_id) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000013",
+      "name": "Worth Answering?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        820,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/checkout",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ business_id: $('Normalise Messages').item.json.business_id, department: \"CRM\", message: \"Reading a buyer message\" }) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000014",
+      "name": "Claim The CRM Desk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        -200
+      ],
+      "notes": "423 if the desk is paused or the floor is suspended, which aborts this message. PAUSED wins here exactly as it does everywhere else."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.ok === true }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000015",
+      "name": "Desk Free?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/conversations/{{ $('File Inbound').item.json.conversation_id }}",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000016",
+      "name": "Read The Thread",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1480,
+        -260
+      ],
+      "notes": "The last forty lines, so the draft answers what was actually asked rather than only the newest sentence."
+    },
+    {
+      "parameters": {
+        "jsCode": "// The prompt is built from the skills this desk actually has switched on, so\n// turning one off in the dashboard really does change what the model is asked\n// to do rather than only what the screen says.\nconst checkout = $('Claim The CRM Desk').item.json;\nconst thread = $('Read The Thread').item.json;\nconst skills = (checkout.skills ?? []).map((s) => `- ${s.name}: ${s.summary}`).join('\\n');\nconst history = (thread.messages ?? [])\n  .map((m) => `${m.direction === 'IN' ? 'Buyer' : 'Us'}: ${m.body}`)\n  .join('\\n');\nconst c = thread.conversation ?? {};\n\nconst prompt = [\n  `You answer buyers for ${c.account_label ?? 'our shop'} on ${c.channel}.`,\n  'What this desk is for:', skills || '- answering buyers politely and accurately',\n  '',\n  'Rules:',\n  '- Write one short reply, in the language the buyer used.',\n  '- Philippine pesos, written as PHP 1,250.',\n  '- Never promise stock, a delivery date or a discount you were not told about.',\n  '- If you do not know, say you will check — do not invent an answer.',\n  '- Never offer to call them: this channel has no voice, only chat.',\n  '',\n  c.product_name ? `They seem to be asking about: ${c.product_name} (${c.product_sku}).` : '',\n  '', 'The conversation so far:', history,\n  '', 'Write only the reply.',\n].filter(Boolean).join('\\n');\n\nreturn [{ json: { prompt, conversation_id: c.id, business_id: c.business_id,\n                  agent_id: checkout.agent.id } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000017",
+      "name": "Build The Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1700,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.OLLAMA_URL }}/api/generate",
+        "method": "POST",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL || \"llama3.1\", prompt: $json.prompt, stream: false }) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000018",
+      "name": "Ask Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1920,
+        -260
+      ],
+      "notes": "If Ollama is down this comes back without a response and the next node files nothing, leaving the desk to be released rather than filing an empty draft for someone to approve."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/approvals",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ agent_id: $('Build The Prompt').item.json.agent_id, payload: { type: \"chat_reply\", title: `Reply to ${$('Read The Thread').item.json.conversation.buyer_name}`, draft: ($json.response || \"\").trim(), channel: $('Read The Thread').item.json.conversation.channel, recipient: $('Read The Thread').item.json.conversation.buyer_handle, conversation_id: $('Build The Prompt').item.json.conversation_id, account_id: $('Read The Thread').item.json.conversation.account_id, source: { conversation_id: $('Build The Prompt').item.json.conversation_id } } }) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000019",
+      "name": "File The Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2140,
+        -260
+      ],
+      "notes": "PENDING. Nothing has reached the buyer; the desk now reads AWAITING_APPROVAL until a human clicks."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/{{ $('Claim The CRM Desk').item.json.agent.id }}/release",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: \"Nothing to answer\" }) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000020",
+      "name": "Release The Desk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1480,
+        -120
+      ],
+      "notes": "A desk claimed for a message the model could not answer goes back to IDLE rather than sitting at WORKING forever."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-reply",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000021",
+      "name": "Approved Reply",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1180,
+        460
+      ],
+      "notes": "Called by the backend only after an approval row has moved PENDING -> APPROVED. Set N8N_CHAT_WEBHOOK_URL to this path.",
+      "webhookId": "chat-reply"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two kinds come through here: a reply to a buyer, and the Payment Collector's\n// nudge about an order nobody has paid for. Both are a line of text going to a\n// customer, so both arrive with an approval id behind them.\nconst body = $input.first().json.body;\nconst payload = body.payload ?? {};\nconst conversation = body.conversation ?? null;\nconst order = body.order ?? null;\n\n// A chase has an order but may have no thread yet; answering on the order's\n// own conversation is better than opening a second one.\nconst channel = payload.channel || conversation?.channel || 'email';\nreturn [{ json: {\n  approval_id: body.approval_id,\n  business_id: body.business_id,\n  conversation_id: payload.conversation_id ?? conversation?.id ?? null,\n  account_id: payload.account_id ?? conversation?.account_id ?? null,\n  external_id: conversation?.external_id ?? null,\n  recipient: payload.recipient ?? conversation?.buyer_handle ?? order?.buyer_name ?? null,\n  channel,\n  platform: channel.replace(/_(chat|dm)$/, '').replace('meta', 'facebook'),\n  text: String(payload.draft ?? '').trim(),\n  kind: payload.type,\n} }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000022",
+      "name": "What Was Approved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -960,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "method": "GET",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000023",
+      "name": "Credentials To Send With",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -740,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('What Was Approved').item.json.platform }}",
+                    "rightValue": "shopee"
+                  }
+                ]
+              },
+              "outputKey": "shopee"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('What Was Approved').item.json.platform }}",
+                    "rightValue": "lazada"
+                  }
+                ]
+              },
+              "outputKey": "lazada"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('What Was Approved').item.json.platform }}",
+                    "rightValue": "tiktok"
+                  }
+                ]
+              },
+              "outputKey": "tiktok"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('What Was Approved').item.json.platform }}",
+                    "rightValue": "facebook"
+                  }
+                ]
+              },
+              "outputKey": "facebook"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000024",
+      "name": "Which Sender",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -520,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shopee: sellerchat/send_message, same v2 signature as the poller.\nconst crypto = require('crypto');\nconst creds = $('Credentials To Send With').item.json.credentials;\nconst msg = $('What Was Approved').item.json;\nif (!creds?.access_token) {\n  return [{ json: { ...msg, failed: true, error: 'SHOPEE access_token is not set for this shop' } }];\n}\nconst host = creds.host || 'https://partner.shopeemobile.com';\nconst path = '/api/v2/sellerchat/send_message';\nconst ts = Math.floor(Date.now() / 1000);\nconst base = `${creds.partner_id}${path}${ts}${creds.access_token}${creds.shop_id}`;\nconst sign = crypto.createHmac('sha256', creds.partner_key).update(base).digest('hex');\nconst query = new URLSearchParams({\n  partner_id: String(creds.partner_id), timestamp: String(ts),\n  access_token: creds.access_token, shop_id: String(creds.shop_id), sign });\nreturn [{ json: { ...msg, url: `${host}${path}?${query}`, method: 'POST',\n  payload: { to_id: Number(msg.recipient), message_type: 'text',\n             content: { text: msg.text } } } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000025",
+      "name": "Send On Shopee",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Lazada: /im/message/send.\nconst crypto = require('crypto');\nconst creds = $('Credentials To Send With').item.json.credentials;\nconst msg = $('What Was Approved').item.json;\nif (!creds?.access_token) {\n  return [{ json: { ...msg, failed: true, error: 'LAZADA access_token is not set for this shop' } }];\n}\nconst host = creds.host || 'https://api.lazada.com.ph/rest';\nconst path = '/im/message/send';\nconst params = { app_key: creds.app_key, access_token: creds.access_token,\n                 timestamp: String(Date.now()), sign_method: 'sha256',\n                 session_id: String(msg.external_id ?? ''),\n                 template_id: '1', txt: msg.text };\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst sign = crypto.createHmac('sha256', creds.app_secret)\n  .update(path + sorted).digest('hex').toUpperCase();\nreturn [{ json: { ...msg, url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n  method: 'POST', payload: {} } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000026",
+      "name": "Send On Lazada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// TikTok Shop: customer_service/202309/messages.\nconst crypto = require('crypto');\nconst creds = $('Credentials To Send With').item.json.credentials;\nconst msg = $('What Was Approved').item.json;\nif (!creds?.access_token || !creds?.shop_cipher) {\n  return [{ json: { ...msg, failed: true,\n    error: 'TIKTOK access_token or shop_cipher is not set for this shop' } }];\n}\nconst host = creds.host || 'https://open-api.tiktokglobalshop.com';\nconst path = `/customer_service/202309/conversations/${msg.external_id}/messages`;\nconst body = JSON.stringify({ type: 'TEXT', content: JSON.stringify({ content: msg.text }) });\nconst params = { app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n                 timestamp: String(Math.floor(Date.now() / 1000)), version: '202309' };\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst base = creds.app_secret + path + sorted + body + creds.app_secret;\nconst sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\nreturn [{ json: { ...msg, url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n  method: 'POST', payload: JSON.parse(body), access_token: creds.access_token } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000027",
+      "name": "Send On TikTok",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Meta: the Send API, on the page token this account holds.\nconst creds = $('Credentials To Send With').item.json.credentials;\nconst msg = $('What Was Approved').item.json;\nif (!creds?.page_access_token) {\n  return [{ json: { ...msg, failed: true,\n    error: 'META page_access_token is not set for this page' } }];\n}\nreturn [{ json: { ...msg,\n  url: `https://graph.facebook.com/v21.0/me/messages?access_token=${creds.page_access_token}`,\n  method: 'POST',\n  payload: { recipient: { id: msg.recipient }, messaging_type: 'RESPONSE',\n             message: { text: msg.text } } } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000028",
+      "name": "Send On Messenger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Nobody wired a sender for this channel. The reply is reported as failed with\n// the reason, so the thread goes back to OPEN and somebody can answer by hand\n// — rather than the approval looking sent and the buyer hearing nothing.\nconst msg = $('What Was Approved').item.json;\nreturn [{ json: { ...msg, failed: true,\n  error: `No sender is wired up for ${msg.channel} yet.` } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000029",
+      "name": "No Sender For This",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "={{ $json.method }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-tts-access-token",
+              "value": "={{ $json.access_token || \"\" }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload ?? {}) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000030",
+      "name": "Really Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -40,
+        460
+      ],
+      "notes": "Skipped for an item already marked failed; the next node reads either."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/conversations/{{ $('What Was Approved').item.json.conversation_id }}/messages",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ approval_id: $('What Was Approved').item.json.approval_id, body: $('What Was Approved').item.json.text, failed: Boolean($json.failed) || ($json.statusCode ?? 200) >= 400, error: $json.error ?? null, external_id: $json.body?.message_id ?? null }) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000031",
+      "name": "Report What Happened",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        460
+      ],
+      "notes": "The only place an outbound line is written, and it can only be written against an approval that is APPROVED. A failure puts the thread back to OPEN so it is visibly still unanswered."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, sent: !$json.failed }) }}",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000032",
+      "name": "Done",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        400,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Chat Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Accounts": {
+      "main": [
+        [
+          {
+            "node": "One Account Each",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Account Each": {
+      "main": [
+        [
+          {
+            "node": "Get Account Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Account Credentials": {
+      "main": [
+        [
+          {
+            "node": "Which Marketplace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Which Marketplace": {
+      "main": [
+        [
+          {
+            "node": "Poll Shopee Chat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Poll Lazada Chat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Poll TikTok Chat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unwired Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Shopee Chat": {
+      "main": [
+        [
+          {
+            "node": "Fetch Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Lazada Chat": {
+      "main": [
+        [
+          {
+            "node": "Fetch Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll TikTok Chat": {
+      "main": [
+        [
+          {
+            "node": "Fetch Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Chat": {
+      "main": [
+        [
+          {
+            "node": "Normalise Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Messages": {
+      "main": [
+        [
+          {
+            "node": "File Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File Inbound": {
+      "main": [
+        [
+          {
+            "node": "Worth Answering?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worth Answering?": {
+      "main": [
+        [
+          {
+            "node": "Claim The CRM Desk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim The CRM Desk": {
+      "main": [
+        [
+          {
+            "node": "Desk Free?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Desk Free?": {
+      "main": [
+        [
+          {
+            "node": "Read The Thread",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Release The Desk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read The Thread": {
+      "main": [
+        [
+          {
+            "node": "Build The Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build The Prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Ollama": {
+      "main": [
+        [
+          {
+            "node": "File The Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved Reply": {
+      "main": [
+        [
+          {
+            "node": "What Was Approved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "What Was Approved": {
+      "main": [
+        [
+          {
+            "node": "Credentials To Send With",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Credentials To Send With": {
+      "main": [
+        [
+          {
+            "node": "Which Sender",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Which Sender": {
+      "main": [
+        [
+          {
+            "node": "Send On Shopee",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send On Lazada",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send On TikTok",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send On Messenger",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Sender For This",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send On Shopee": {
+      "main": [
+        [
+          {
+            "node": "Really Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send On Lazada": {
+      "main": [
+        [
+          {
+            "node": "Really Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send On TikTok": {
+      "main": [
+        [
+          {
+            "node": "Really Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send On Messenger": {
+      "main": [
+        [
+          {
+            "node": "Really Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Sender For This": {
+      "main": [
+        [
+          {
+            "node": "Really Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Really Send": {
+      "main": [
+        [
+          {
+            "node": "Report What Happened",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report What Happened": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

@@ -541,6 +541,35 @@ export function registerLive(app, ctx) {
 
   // ------------------------------------------------------- internal (n8n)
 
+  /**
+   * The rooms a sweep should be watching. `armed` is the one word the
+   * workflow needs: a session is only answerable when a human approved it and
+   * nobody has paused it since.
+   */
+  app.get('/api/internal/live/sessions', wrap(async (req, res) => {
+    const status = String(req.query.status ?? 'LIVE').toUpperCase();
+    if (!['SCHEDULED', 'ARMED', 'LIVE', 'PAUSED', 'ENDED', 'ALL'].includes(status)) {
+      throw new HttpError(400, 'unknown status');
+    }
+    const { rows } = await q(
+      `SELECT s.id FROM live_sessions s
+         JOIN businesses b ON b.id = s.business_id AND b.is_active
+        WHERE ($1 = 'ALL' OR s.status = $1)
+        ORDER BY s.started_at DESC NULLS LAST LIMIT 50`, [status]);
+    const sessions = [];
+    for (const row of rows) {
+      const session = await readSession(row.id);
+      if (!session) continue;
+      const { rows: approval } = await q(
+        `SELECT status FROM approvals WHERE id = $1`, [session.armed_approval_id ?? null]);
+      sessions.push({
+        ...session,
+        armed: session.status === 'LIVE' && approval[0]?.status === 'APPROVED',
+      });
+    }
+    res.json({ sessions });
+  }));
+
   /** Everything the live workflow needs to run one session. */
   app.get('/api/internal/live/:id', wrap(async (req, res) => {
     const session = await readSession(req.params.id);
