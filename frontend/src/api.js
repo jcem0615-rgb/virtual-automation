@@ -54,6 +54,11 @@ export const api = {
   },
   editPost: (id, body) =>
     request(`/api/posts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  publishPost: (id, platforms) =>
+    request(`/api/posts/${id}/publish`, {
+      method: 'POST',
+      body: JSON.stringify(platforms ? { platforms } : {}),
+    }),
   setSkill: (agentId, key, enabled) =>
     request(`/api/agents/${agentId}/skills/${key}`, {
       method: 'PATCH',

@@ -93,12 +93,18 @@ the realtime path depends on triggers.
   `users (is_platform_owner) WHERE is_platform_owner` enforces it, `create-user.js`
   refuses a second with the current one's name, and `transfer-owner.js` moves it in one
   transaction. Do not add a way to make more.
-- **A post edit is outbound work, so it goes through the gate.** `PATCH /api/posts/:id`
-  never touches a platform. If the post is live anywhere it files an approval of type
-  `post_update` and marks those targets `UPDATE_PENDING`; approving calls
-  `N8N_POST_SYNC_WEBHOOK_URL`, and each platform reports its own result back to
-  `/api/internal/posts/:id/targets`. Rejecting puts the targets back to `PUBLISHED` and
-  touches nothing outside. A post that is live nowhere is just a draft and saves directly.
+- **A post reaching a platform is outbound work, so it goes through the gate.** Neither
+  `PATCH /api/posts/:id` nor `POST /api/posts/:id/publish` touches a platform. An edit to
+  a live post files a `post_update` approval and marks those targets `UPDATE_PENDING`; a
+  first send files `post_publish` and marks them `PUBLISH_PENDING`. Approving either
+  calls `N8N_POST_SYNC_WEBHOOK_URL`; each platform reports its own result back to
+  `/api/internal/posts/:id/targets`. Rejecting returns `UPDATE_PENDING` to `PUBLISHED`
+  and `PUBLISH_PENDING` to `NOT_PUBLISHED`, so a discarded send never looks sent. A post
+  that is live nowhere and is only being edited is a draft and saves directly.
+- **A sender that cannot do the job says so.** The sync workflow reports a target
+  `FAILED` with a readable reason rather than skipping it: Instagram and TikTok cannot
+  edit a published post, Shopee cannot create a listing from a caption, and an unset
+  credential names the variable. Keep that; a silently skipped platform looks sent.
 - **Suspension closes a business everywhere.** `resolveSession()` only counts memberships
   in businesses with `is_active`, so a suspended one leaves `businessIds` and every scope
   derived from it: REST reads, guarded writes, socket rooms. `/api/internal/*` checks it

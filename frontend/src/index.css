@@ -14,3 +14,8 @@ body {
 
 /* A tap should not select the label underneath it. */
 button { -webkit-tap-highlight-color: transparent; }
+
+/* Phaser writes an explicit pixel width onto its canvas. Without this the
+   canvas holds its column open at that width and the page stops being able to
+   narrow, which shows up as sideways scrolling on a phone. */
+canvas { max-width: 100%; }

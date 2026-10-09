@@ -150,18 +150,6 @@
     },
     {
       "parameters": {},
-      "id": "b1000000-0000-4000-8000-000000000005",
-      "name": "Send Shopee Reply — PLACEHOLDER",
-      "type": "n8n-nodes-base.noOp",
-      "typeVersion": 1,
-      "position": [
-        -140,
-        400
-      ],
-      "notes": "Replace with the Shopee Open Platform chat endpoint."
-    },
-    {
-      "parameters": {},
       "id": "b1000000-0000-4000-8000-000000000006",
       "name": "Unrouted Channel",
       "type": "n8n-nodes-base.noOp",
@@ -214,6 +202,41 @@
         380,
         300
       ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shopee's Seller Chat, signed the same way as any other shop API:\n//   partner_id + api_path + timestamp + access_token + shop_id\n// HMAC-SHA256 under the partner key. Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto.\nconst crypto = require('crypto');\n\nconst partnerId = Number($env.SHOPEE_PARTNER_ID);\nconst partnerKey = $env.SHOPEE_PARTNER_KEY;\nconst shopId = Number($env.SHOPEE_SHOP_ID);\nconst accessToken = $env.SHOPEE_ACCESS_TOKEN;\nconst host = $env.SHOPEE_HOST || 'https://partner.shopeemobile.com';\n\nconst payload = $input.first().json.body.payload;\nconst missing = [];\nif (!partnerId) missing.push('SHOPEE_PARTNER_ID');\nif (!partnerKey) missing.push('SHOPEE_PARTNER_KEY');\nif (!shopId) missing.push('SHOPEE_SHOP_ID');\nif (!accessToken) missing.push('SHOPEE_ACCESS_TOKEN');\nif (missing.length) {\n  throw new Error('Shopee is not configured: ' + missing.join(', ') + ' are unset.');\n}\nif (!payload.recipient) {\n  throw new Error('No Shopee buyer id on this approval, so there is nobody to reply to.');\n}\n\nconst path = '/api/v2/sellerchat/send_message';\nconst timestamp = Math.floor(Date.now() / 1000);\nconst base = `${partnerId}${path}${timestamp}${accessToken}${shopId}`;\nconst sign = crypto.createHmac('sha256', partnerKey).update(base).digest('hex');\n\nreturn [{ json: {\n  url: `${host}${path}?partner_id=${partnerId}&timestamp=${timestamp}`\n     + `&access_token=${accessToken}&shop_id=${shopId}&sign=${sign}`,\n  payload: {\n    to_id: Number(payload.recipient),\n    message_type: 'text',\n    content: { text: payload.draft },\n  },\n} }];"
+      },
+      "id": "b1000000-0000-4000-8000-000000000010",
+      "name": "Sign Shopee Chat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        400
+      ],
+      "notes": "payload.recipient is the buyer's Shopee user id, carried through from the message that started the run."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000011",
+      "name": "Send Shopee Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        400
+      ],
+      "notes": "POST /api/v2/sellerchat/send_message."
     }
   ],
   "connections": {
@@ -246,7 +269,7 @@
         ],
         [
           {
-            "node": "Send Shopee Reply — PLACEHOLDER",
+            "node": "Sign Shopee Chat",
             "type": "main",
             "index": 0
           }
@@ -261,17 +284,6 @@
       ]
     },
     "Send Email — PLACEHOLDER": {
-      "main": [
-        [
-          {
-            "node": "Release Agent",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Send Shopee Reply — PLACEHOLDER": {
       "main": [
         [
           {
@@ -305,6 +317,28 @@
       ]
     },
     "Send Messenger Reply": {
+      "main": [
+        [
+          {
+            "node": "Release Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Shopee Chat": {
+      "main": [
+        [
+          {
+            "node": "Send Shopee Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Shopee Reply": {
       "main": [
         [
           {

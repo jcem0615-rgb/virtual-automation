@@ -401,3 +401,9 @@ DROP TRIGGER IF EXISTS social_posts_notify ON social_posts;
 CREATE TRIGGER social_posts_notify
   AFTER INSERT OR UPDATE OR DELETE ON social_posts
   FOR EACH ROW EXECUTE FUNCTION notify_office_event('social_post');
+
+-- A platform copy can also be on its way out for the first time, which is a
+-- different thing from an edit chasing an already-live post.
+ALTER TABLE social_post_targets DROP CONSTRAINT IF EXISTS social_post_targets_state_check;
+ALTER TABLE social_post_targets ADD CONSTRAINT social_post_targets_state_check
+  CHECK (state IN ('NOT_PUBLISHED','PUBLISH_PENDING','PUBLISHED','UPDATE_PENDING','FAILED'));

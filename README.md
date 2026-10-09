@@ -158,18 +158,43 @@ shows the platforms it is on and the state of each copy.
 - **Editing** — edit the text in the app and choose which platforms it should go to.
   If the post is already live anywhere, **saving does not publish**: it files an approval
   like any other outbound work, and those platform copies show as *updating*.
-- **Approving** sends it. `workflow_post_sync.json` updates each platform in place and
-  reports back per platform, so the dashboard shows exactly which copies went out and
-  which did not, with the reason.
+- **Sending it out** — a post that is not on a platform yet gets a **Send it out**
+  button. That files an approval too; nothing goes out unapproved.
+- **Approving** sends it. `workflow_post_sync.json` publishes or edits each copy
+  depending on whether that platform already holds one, and reports back per platform, so
+  the dashboard shows exactly which copies went out and which did not, with the reason.
 - **Rejecting** discards the edit; the live copies are never touched.
 
 The list has a **filter per platform**, so you can work on one channel at a time instead
 of scrolling a mixed feed.
 
-Two honest limits: editing a Facebook page post works through the Graph API, but
-**Instagram does not allow editing a published caption** — the workflow reports that copy
-as failed with the reason rather than pretending it worked. Shopee, Lazada, TikTok and X
-are routed but their senders are placeholders.
+### What each platform can actually do
+
+| | Publish a new post | Edit a live post |
+| --- | --- | --- |
+| **Facebook** | ✅ `POST /{page-id}/feed` | ✅ `POST /{post-id}` |
+| **Shopee** | ❌ a listing needs a category, attributes and logistics — create it in Seller Centre | ✅ `product/update_item` |
+| **TikTok** | ✅ Content Posting API, needs an image or video | ❌ no edit endpoint exists |
+| **Instagram** | ❌ not wired | ❌ captions cannot be edited through the API |
+| **Lazada / X** | ❌ not wired | ❌ not wired |
+
+Where a platform cannot do something, the workflow marks that copy **failed with the
+reason** instead of skipping it quietly — so the dashboard never shows a post as sent
+when it was not.
+
+**Shopee** needs `SHOPEE_PARTNER_ID`, `SHOPEE_PARTNER_KEY`, `SHOPEE_SHOP_ID` and
+`SHOPEE_ACCESS_TOKEN` from the Open Platform console. Every call is signed
+`HMAC-SHA256(partner_id + path + timestamp + access_token + shop_id)` under your partner
+key. The access token is per shop and expires in hours, so refresh it on a schedule.
+`SHOPEE_HOST` switches region or sandbox. The same credentials power the Shopee branch of
+the dispatch workflow, which answers buyer chats through `sellerchat/send_message`.
+
+**TikTok** needs `TIKTOK_ACCESS_TOKEN` with `video.publish` / `photo.publish`, an audited
+app, and the media URL's domain verified with TikTok. A `.mp4`/`.mov`/`.webm` media URL
+goes out as a video, anything else as a photo post.
+
+**Facebook** needs `META_PAGE_ID` to publish something new; editing only needs the post
+id it already has.
 
 ## Connecting a Facebook or Instagram page
 

@@ -1,5 +1,5 @@
 {
-  "name": "Post Sync — push an approved edit to the platforms",
+  "name": "Post Sync — publish or edit on each platform",
   "active": false,
   "settings": {
     "executionOrder": "v1"
@@ -25,7 +25,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// One item per platform copy that actually needs updating, carrying the\n// external id the platform knows the post by.\nconst body = $input.first().json.body;\nconst post = body.post;\nconst wanted = body.payload.platforms ?? [];\n\nreturn post.targets\n  .filter((t) => wanted.includes(t.platform) && t.external_id)\n  .map((t) => ({ json: {\n    post_id: post.id,\n    platform: t.platform,\n    external_id: t.external_id,\n    body: body.payload.draft,\n    title: post.title,\n  } }));"
+        "jsCode": "// One item per platform copy, tagged with what has to happen to it.\n// An external id means the platform already holds a copy, so this is an edit;\n// no id means it has never gone out, so this is a first publish.\nconst body = $input.first().json.body;\nconst post = body.post;\nconst wanted = body.payload.platforms ?? [];\n\nreturn post.targets\n  .filter((t) => wanted.includes(t.platform))\n  .map((t) => ({ json: {\n    post_id: post.id,\n    platform: t.platform,\n    external_id: t.external_id ?? null,\n    action: t.external_id ? 'update' : 'publish',\n    body: body.payload.draft,\n    title: post.title,\n    media_url: post.media_url ?? null,\n  } }));"
       },
       "id": "d1000000-0000-4000-8000-000000000002",
       "name": "One Item Per Platform",
@@ -122,7 +122,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=https://graph.facebook.com/v21.0/{{ $json.external_id }}",
+        "url": "={{ $json.action === 'update' ? 'https://graph.facebook.com/v21.0/' + $json.external_id : 'https://graph.facebook.com/v21.0/' + ($env.META_PAGE_ID || 'me') + '/feed' }}",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -146,14 +146,14 @@
         }
       },
       "id": "d1000000-0000-4000-8000-000000000004",
-      "name": "Edit Facebook Post",
+      "name": "Post Or Edit On Facebook",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
         -80,
         120
       ],
-      "notes": "A page post's text is edited in place with POST /{post-id}. Needs pages_manage_posts on the token."
+      "notes": "An edit is POST /{post-id}; a first publish is POST /{page-id}/feed. Both need pages_manage_posts on the token."
     },
     {
       "parameters": {
@@ -170,33 +170,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Replace with the Shopee Open Platform item-update call. Until then the\n// dashboard is told plainly that nothing happened.\nreturn $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: 'Shopee sender is not wired up yet.',\n} }));"
-      },
-      "id": "d1000000-0000-4000-8000-000000000006",
-      "name": "Shopee — PLACEHOLDER",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -80,
-        400
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "return $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: 'No sender is wired up for ' + item.json.platform + ' yet.',\n} }));"
-      },
-      "id": "d1000000-0000-4000-8000-000000000007",
-      "name": "Unwired Platform",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -80,
-        540
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "// Turn the Facebook response into the same shape the other branches use.\nreturn $input.all().map((item) => {\n  const ok = item.json.statusCode === 200;\n  const source = $('One Item Per Platform').all()[0].json;\n  return { json: {\n    post_id: item.json.body?.post_id ?? source.post_id,\n    platform: 'facebook',\n    external_id: source.external_id,\n    state: ok ? 'PUBLISHED' : 'FAILED',\n    error: ok ? null : ('Facebook refused the edit: ' + JSON.stringify(item.json.body ?? {}).slice(0, 200)),\n  } };\n});"
+        "jsCode": "// Normalise the platform's answer into the one shape Report Back expects.\nreturn $input.all().map((item) => {\n  const res = item.json;\n  const sent = res.skip === true ? null : res;\n  if (res.skip === true) return { json: res };\n  const ok = res.statusCode >= 200 && res.statusCode < 300\n    && !(res.body && res.body.error && res.body.error !== 'ok' && res.body.error !== '');\n  return { json: {\n    post_id: res.post_id,\n    platform: 'facebook',\n    external_id: res.body?.id ?? res.external_id,\n    state: ok ? 'PUBLISHED' : 'FAILED',\n    error: ok ? null : ('facebook refused it: ' + JSON.stringify(res.body ?? {}).slice(0, 240)),\n  } };\n});"
       },
       "id": "d1000000-0000-4000-8000-000000000008",
       "name": "Read Facebook Result",
@@ -249,6 +223,202 @@
         620,
         300
       ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shopee signs every call. The base string for a shop-level API is\n//   partner_id + api_path + timestamp + access_token + shop_id\n// hashed with HMAC-SHA256 under the partner key, hex, lower case.\n// Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto, which docker-compose.yml sets.\nconst crypto = require('crypto');\n\nconst partnerId = Number($env.SHOPEE_PARTNER_ID);\nconst partnerKey = $env.SHOPEE_PARTNER_KEY;\nconst shopId = Number($env.SHOPEE_SHOP_ID);\nconst accessToken = $env.SHOPEE_ACCESS_TOKEN;\nconst host = $env.SHOPEE_HOST || 'https://partner.shopeemobile.com';\n\nreturn $input.all().map((item) => {\n  const missing = [];\n  if (!partnerId) missing.push('SHOPEE_PARTNER_ID');\n  if (!partnerKey) missing.push('SHOPEE_PARTNER_KEY');\n  if (!shopId) missing.push('SHOPEE_SHOP_ID');\n  if (!accessToken) missing.push('SHOPEE_ACCESS_TOKEN');\n  if (missing.length) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'Shopee is not configured: ' + missing.join(', ') + ' are unset.' } };\n  }\n\n  // Shopee has no \"create a listing from a caption\" call — a new item needs a\n  // category, attributes and logistics. Editing an existing one is the part\n  // that maps onto a post, so a first publish is reported rather than faked.\n  if (item.json.action === 'publish') {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'Shopee listings are created in Seller Centre; this app can edit one once it exists.' } };\n  }\n\n  const path = '/api/v2/product/update_item';\n  const timestamp = Math.floor(Date.now() / 1000);\n  const base = `${partnerId}${path}${timestamp}${accessToken}${shopId}`;\n  const sign = crypto.createHmac('sha256', partnerKey).update(base).digest('hex');\n\n  return { json: { ...item.json, skip: false,\n    url: `${host}${path}?partner_id=${partnerId}&timestamp=${timestamp}`\n       + `&access_token=${accessToken}&shop_id=${shopId}&sign=${sign}`,\n    payload: { item_id: Number(item.json.external_id), description: item.json.body },\n  } };\n});"
+      },
+      "id": "d1000000-0000-4000-8000-000000000010",
+      "name": "Sign Shopee Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        400
+      ],
+      "notes": "Builds the signed URL. SHOPEE_HOST is the regional or sandbox host."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "sk1",
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              },
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000011",
+      "name": "Shopee Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        140,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000012",
+      "name": "Update Shopee Listing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        360
+      ],
+      "notes": "POST /api/v2/product/update_item. Shopee answers 200 with an `error` field set when it refuses, which the next node checks."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise the platform's answer into the one shape Report Back expects.\nreturn $input.all().map((item) => {\n  const res = item.json;\n  const sent = res.skip === true ? null : res;\n  if (res.skip === true) return { json: res };\n  const ok = res.statusCode >= 200 && res.statusCode < 300\n    && !(res.body && res.body.error && res.body.error !== 'ok' && res.body.error !== '');\n  return { json: {\n    post_id: res.post_id,\n    platform: 'shopee',\n    external_id: res.external_id,\n    state: ok ? 'PUBLISHED' : 'FAILED',\n    error: ok ? null : ('shopee refused it: ' + JSON.stringify(res.body ?? {}).slice(0, 240)),\n  } };\n});"
+      },
+      "id": "d1000000-0000-4000-8000-000000000013",
+      "name": "Read Shopee Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// TikTok's Content Posting API can put a post up, but there is no endpoint to\n// change one after it is live — so an edit is reported honestly instead of\n// being silently dropped.\nreturn $input.all().map((item) => {\n  if (!$env.TIKTOK_ACCESS_TOKEN) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok is not configured: TIKTOK_ACCESS_TOKEN is unset.' } };\n  }\n  if (item.json.action === 'update') {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok posts cannot be edited after publishing — delete and repost, or edit in the app only.' } };\n  }\n  if (!item.json.media_url) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok needs an image or video; this post has no media.' } };\n  }\n  const isVideo = /\\.(mp4|mov|webm)(\\?|$)/i.test(item.json.media_url);\n  return { json: { ...item.json, skip: false,\n    url: 'https://open.tiktokapis.com/v2/post/publish/'\n       + (isVideo ? 'video' : 'content') + '/init/',\n    payload: {\n      post_info: {\n        title: item.json.title.slice(0, 90),\n        description: item.json.body.slice(0, 4000),\n        privacy_level: $env.TIKTOK_PRIVACY_LEVEL || 'PUBLIC_TO_EVERYONE',\n      },\n      source_info: isVideo\n        ? { source: 'PULL_FROM_URL', video_url: item.json.media_url }\n        : { source: 'PULL_FROM_URL', photo_cover_index: 0, photo_images: [item.json.media_url] },\n      post_mode: 'DIRECT_POST',\n      media_type: isVideo ? 'VIDEO' : 'PHOTO',\n    },\n  } };\n});"
+      },
+      "id": "d1000000-0000-4000-8000-000000000014",
+      "name": "Prepare TikTok Post",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "tk1",
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              },
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000015",
+      "name": "TikTok Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        140,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.TIKTOK_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json; charset=UTF-8"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000016",
+      "name": "Publish To TikTok",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        520
+      ],
+      "notes": "Content Posting API. The app needs video.publish / photo.publish and an audited client, and the media URL's domain must be verified with TikTok."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise the platform's answer into the one shape Report Back expects.\nreturn $input.all().map((item) => {\n  const res = item.json;\n  const sent = res.skip === true ? null : res;\n  if (res.skip === true) return { json: res };\n  const ok = res.statusCode >= 200 && res.statusCode < 300\n    && !(res.body && res.body.error && res.body.error !== 'ok' && res.body.error !== '');\n  return { json: {\n    post_id: res.post_id,\n    platform: 'tiktok',\n    external_id: res.body?.data?.publish_id ?? null,\n    state: ok ? 'PUBLISHED' : 'FAILED',\n    error: ok ? null : ('tiktok refused it: ' + JSON.stringify(res.body ?? {}).slice(0, 240)),\n  } };\n});"
+      },
+      "id": "d1000000-0000-4000-8000-000000000017",
+      "name": "Read TikTok Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        520
+      ],
+      "notes": "TikTok returns a publish_id; the post id arrives later by webhook, so the publish_id is what is stored."
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: item.json.error ?? ('No sender is wired up for ' + item.json.platform + ' yet.'),\n} }));"
+      },
+      "id": "d1000000-0000-4000-8000-000000000018",
+      "name": "Unwired Or Refused",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        700
+      ]
     }
   ],
   "connections": {
@@ -278,7 +448,7 @@
       "main": [
         [
           {
-            "node": "Edit Facebook Post",
+            "node": "Post Or Edit On Facebook",
             "type": "main",
             "index": 0
           }
@@ -292,25 +462,14 @@
         ],
         [
           {
-            "node": "Shopee — PLACEHOLDER",
+            "node": "Sign Shopee Request",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Unwired Platform",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Edit Facebook Post": {
-      "main": [
-        [
-          {
-            "node": "Read Facebook Result",
+            "node": "Prepare TikTok Post",
             "type": "main",
             "index": 0
           }
@@ -339,33 +498,135 @@
         ]
       ]
     },
-    "Shopee — PLACEHOLDER": {
-      "main": [
-        [
-          {
-            "node": "Report Back",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Unwired Platform": {
-      "main": [
-        [
-          {
-            "node": "Report Back",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Report Back": {
       "main": [
         [
           {
             "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Or Edit On Facebook": {
+      "main": [
+        [
+          {
+            "node": "Read Facebook Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Shopee Request": {
+      "main": [
+        [
+          {
+            "node": "Shopee Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopee Ready?": {
+      "main": [
+        [
+          {
+            "node": "Update Shopee Listing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unwired Or Refused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Shopee Listing": {
+      "main": [
+        [
+          {
+            "node": "Read Shopee Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Shopee Result": {
+      "main": [
+        [
+          {
+            "node": "Report Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare TikTok Post": {
+      "main": [
+        [
+          {
+            "node": "TikTok Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TikTok Ready?": {
+      "main": [
+        [
+          {
+            "node": "Publish To TikTok",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unwired Or Refused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish To TikTok": {
+      "main": [
+        [
+          {
+            "node": "Read TikTok Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read TikTok Result": {
+      "main": [
+        [
+          {
+            "node": "Report Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unwired Or Refused": {
+      "main": [
+        [
+          {
+            "node": "Report Back",
             "type": "main",
             "index": 0
           }

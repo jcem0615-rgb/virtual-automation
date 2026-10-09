@@ -16,8 +16,16 @@ const PLATFORM_LABEL = {
 const STATE_STYLE = {
   PUBLISHED: 'bg-emerald-950 text-emerald-300 border-emerald-900',
   UPDATE_PENDING: 'bg-amber-950 text-amber-300 border-amber-900',
+  PUBLISH_PENDING: 'bg-amber-950 text-amber-300 border-amber-900',
   FAILED: 'bg-red-950 text-red-300 border-red-900',
   NOT_PUBLISHED: 'bg-slate-800 text-slate-400 border-slate-700',
+};
+
+const STATE_SUFFIX = {
+  UPDATE_PENDING: ' · updating',
+  PUBLISH_PENDING: ' · sending',
+  FAILED: ' · failed',
+  NOT_PUBLISHED: ' · not sent',
 };
 
 export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
@@ -71,6 +79,23 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
     }
   };
 
+  // Putting a post out for the first time is outbound work too, so it waits
+  // for approval exactly like an edit does.
+  const publish = async (post) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.publishPost(post.id);
+      setNote(`Queued for ${result.platforms.join(', ')}. It goes out once approved.`);
+      await load();
+    } catch (err) {
+      if (err instanceof Unauthorized) return onSignedOut();
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleTarget = (name) => {
     setTargets((current) => (current.includes(name)
       ? current.filter((p) => p !== name)
@@ -78,12 +103,13 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
   };
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900">
-      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3">
+    <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900">
+      {/* Stacks on a phone: a row of seven chips will not share a line with
+          the heading at that width. */}
+      <div className="flex min-w-0 flex-col gap-2 border-b border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-sm font-medium text-slate-200">Social posts</h2>
-        <span className="flex-1" />
         {/* One channel at a time, so the list never mixes platforms up. */}
-        <div className="flex flex-wrap gap-1">
+        <div className="flex min-w-0 flex-wrap gap-1">
           {['all', ...platforms].map((name) => (
             <button
               key={name}
@@ -123,20 +149,29 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
                         className={`rounded-full border px-2 py-0.5 font-mono text-[10px] ${STATE_STYLE[t.state]}`}
                       >
                         {PLATFORM_LABEL[t.platform] ?? t.platform}
-                        {t.state === 'UPDATE_PENDING' && ' · updating'}
-                        {t.state === 'FAILED' && ' · failed'}
-                        {t.state === 'NOT_PUBLISHED' && ' · draft'}
+                        {STATE_SUFFIX[t.state] ?? ''}
                       </span>
                     ))}
                   </div>
                 </div>
                 {editing !== post.id && (
-                  <button
-                    onClick={() => startEdit(post)}
-                    className="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
-                  >
-                    Edit
-                  </button>
+                  <div className="flex shrink-0 gap-2">
+                    {post.targets.some((t) => ['NOT_PUBLISHED', 'FAILED'].includes(t.state)) && (
+                      <button
+                        disabled={busy}
+                        onClick={() => publish(post)}
+                        className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                      >
+                        Send it out
+                      </button>
+                    )}
+                    <button
+                      onClick={() => startEdit(post)}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+                    >
+                      Edit
+                    </button>
+                  </div>
                 )}
               </div>
 

@@ -421,7 +421,7 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
   // Dispatch happens only after the row is committed as APPROVED. A post edit
   // goes to its own workflow, which updates each platform copy in place.
   const payload = outcome.payload_json ?? {};
-  const isPostUpdate = payload.type === 'post_update';
+  const isPostUpdate = payload.type === 'post_update' || payload.type === 'post_publish';
   const dispatch = await callWebhook(
     isPostUpdate ? N8N_POST_SYNC_WEBHOOK_URL : N8N_DISPATCH_WEBHOOK_URL,
     {
@@ -439,8 +439,8 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
   if (isPostUpdate && !dispatch.ok) {
     await q(
       `UPDATE social_post_targets SET state = 'FAILED', last_error = $2
-        WHERE post_id = $1 AND state = 'UPDATE_PENDING'`,
-      [payload.post_id, 'update could not be queued'],
+        WHERE post_id = $1 AND state IN ('UPDATE_PENDING', 'PUBLISH_PENDING')`,
+      [payload.post_id, 'the job could not be queued'],
     ).catch(() => {});
   }
 
@@ -497,15 +497,25 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
 
   // A rejected post edit is simply dropped: the platforms were never touched,
   // so the live copies stay as they are.
-  if (outcome.payload_json?.type === 'post_update') {
+  const postType = outcome.payload_json?.type;
+  if (postType === 'post_update' || postType === 'post_publish') {
     const postId = outcome.payload_json.post_id;
     await tx(async (client) => {
+      // An edit that was chasing a live post leaves it live; one that had not
+      // gone out yet goes back to not published.
       await client.query(
         `UPDATE social_post_targets SET state = 'PUBLISHED'
           WHERE post_id = $1 AND state = 'UPDATE_PENDING'`, [postId]);
       await client.query(
-        `UPDATE social_posts SET status = 'PUBLISHED' WHERE id = $1`, [postId]);
-    }).catch((err) => console.error('[posts] could not roll back edit:', err.message));
+        `UPDATE social_post_targets SET state = 'NOT_PUBLISHED'
+          WHERE post_id = $1 AND state = 'PUBLISH_PENDING'`, [postId]);
+      await client.query(
+        `UPDATE social_posts SET status = CASE
+             WHEN EXISTS (SELECT 1 FROM social_post_targets
+                           WHERE post_id = $1 AND state = 'PUBLISHED')
+             THEN 'PUBLISHED' ELSE 'DRAFT' END
+          WHERE id = $1`, [postId]);
+    }).catch((err) => console.error('[posts] could not roll back:', err.message));
     res.json({ ok: true, approval_id: outcome.id, post_update: 'discarded' });
     return;
   }
@@ -779,6 +789,78 @@ app.patch('/api/posts/:id', wrap(async (req, res) => {
   });
 
   res.json({ ok: true, published: false, needs_approval: true, approval_id: approval.id });
+}));
+
+/**
+ * Put a post on the platforms it is not on yet. Like an edit, this does not
+ * touch anything outside: it files an approval, and approving is what sends.
+ */
+app.post('/api/posts/:id/publish', wrap(async (req, res) => {
+  const postId = assertUuid(req.params.id, 'post_id');
+  const user = req.user;
+  const post = await readPost(postId);
+  if (!post) throw new HttpError(404, 'post not found');
+  assertInScope(user, post.business_id);
+
+  const asked = req.body?.platforms;
+  if (asked !== undefined) {
+    if (!Array.isArray(asked) || !asked.length) {
+      throw new HttpError(400, 'platforms must be a non-empty list');
+    }
+    for (const p of asked) {
+      if (!PLATFORMS.includes(p)) throw new HttpError(400, `unknown platform: ${p}`);
+    }
+  }
+
+  const pending = post.targets
+    .filter((t) => ['NOT_PUBLISHED', 'FAILED'].includes(t.state))
+    .filter((t) => !asked || asked.includes(t.platform))
+    .map((t) => t.platform);
+  if (!pending.length) {
+    throw new HttpError(409, 'every platform you asked for already has this post');
+  }
+
+  const approval = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO approvals (business_id, agent_id, payload_json)
+       VALUES ($1, $2, $3::jsonb)
+       RETURNING id`,
+      [post.business_id, post.agent_id, JSON.stringify({
+        type: 'post_publish',
+        title: `Publish "${post.title}" to ${pending.join(', ')}`,
+        draft: post.body,
+        channel: pending[0],
+        post_id: postId,
+        platforms: pending,
+        source: { post_id: postId, requested_by: user.email },
+      })],
+    );
+    await client.query(
+      `UPDATE social_post_targets SET state = 'PUBLISH_PENDING', last_error = NULL
+        WHERE post_id = $1 AND platform = ANY($2::text[])`,
+      [postId, pending],
+    );
+    if (post.agent_id) {
+      await settleAgent(client, {
+        agentId: post.agent_id,
+        businessId: post.business_id,
+        status: 'AWAITING_APPROVAL',
+        message: `Post waiting to go out: ${post.title}`.slice(0, 500),
+      });
+    }
+    await logAction(client, {
+      businessId: post.business_id,
+      agentId: post.agent_id,
+      approvalId: rows[0].id,
+      action: 'POST_PUBLISH_SUBMITTED',
+      actor: user.email,
+      actorUserId: user.id,
+      detail: { post_id: postId, platforms: pending },
+    });
+    return rows[0];
+  });
+
+  res.json({ ok: true, needs_approval: true, approval_id: approval.id, platforms: pending });
 }));
 
 /** Keep the target rows matching the platforms the post should go to. */
@@ -1211,7 +1293,7 @@ app.post('/api/internal/posts/:id/targets', wrap(async (req, res) => {
       `UPDATE social_posts SET status = 'PUBLISHED'
         WHERE id = $1 AND NOT EXISTS (
           SELECT 1 FROM social_post_targets
-           WHERE post_id = $1 AND state = 'UPDATE_PENDING')`,
+           WHERE post_id = $1 AND state IN ('UPDATE_PENDING', 'PUBLISH_PENDING'))`,
       [postId],
     );
     await logAction(client, {

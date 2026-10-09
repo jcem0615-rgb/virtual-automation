@@ -262,7 +262,10 @@ export default function App() {
         <p className="mx-auto max-w-7xl px-4 pt-3 text-sm text-red-300">{error}</p>
       )}
 
-      <main className="mx-auto grid max-w-7xl gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+      {/* grid-cols-1 matters: an implicit `auto` column sizes to its content,
+          so the canvas's own measured width would hold the column open and the
+          page could never narrow again. */}
+      <main className="mx-auto grid max-w-7xl grid-cols-1 gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_340px]">
         <section className="min-w-0 space-y-4">
           <VirtualOfficeCanvas agents={agents} onSelectAgent={(a) => setSelectedAgentId(a.id)} />
 

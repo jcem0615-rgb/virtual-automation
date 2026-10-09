@@ -46,6 +46,16 @@ services:
       META_APP_SECRET: ${META_APP_SECRET:-}
       META_PAGE_ACCESS_TOKEN: ${META_PAGE_ACCESS_TOKEN:-}
       META_BUSINESS_CODE: ${META_BUSINESS_CODE:-BIZ_ELEC}
+      META_PAGE_ID: ${META_PAGE_ID:-}
+      # Shopee Open Platform. SHOPEE_HOST switches region or sandbox.
+      SHOPEE_PARTNER_ID: ${SHOPEE_PARTNER_ID:-}
+      SHOPEE_PARTNER_KEY: ${SHOPEE_PARTNER_KEY:-}
+      SHOPEE_SHOP_ID: ${SHOPEE_SHOP_ID:-}
+      SHOPEE_ACCESS_TOKEN: ${SHOPEE_ACCESS_TOKEN:-}
+      SHOPEE_HOST: ${SHOPEE_HOST:-https://partner.shopeemobile.com}
+      # TikTok Content Posting API.
+      TIKTOK_ACCESS_TOKEN: ${TIKTOK_ACCESS_TOKEN:-}
+      TIKTOK_PRIVACY_LEVEL: ${TIKTOK_PRIVACY_LEVEL:-PUBLIC_TO_EVERYONE}
     volumes:
       - n8ndata:/home/node/.n8n
     ports:
