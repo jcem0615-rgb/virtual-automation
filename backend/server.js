@@ -114,7 +114,7 @@ io.on('connection', (socket) => {
 
 const AGENT_COLUMNS = `
   id, business_id, department, name, role_title, status,
-  avatar_sprite_key, desk_x, desk_y, last_message, updated_at`;
+  avatar_sprite_key, desk_x, desk_y, last_message, updated_at, removed_at`;
 
 const APPROVAL_COLUMNS = `
   a.id, a.business_id, a.agent_id, a.status, a.payload_json, a.feedback,
@@ -136,7 +136,7 @@ async function readAgents(scope) {
                WHERE s.agent_id = agents.id
             ), '[]') AS skills
        FROM agents
-      WHERE ${where.sql}
+      WHERE ${where.sql} AND removed_at IS NULL
       ORDER BY business_id, desk_y, desk_x`,
     where.params,
   );
@@ -408,6 +408,7 @@ async function readBusinesses(user) {
 // Everything below needs a session.
 app.use('/api/businesses', requireUser);
 app.use('/api/agents', requireUser);
+app.use('/api/departments', requireUser);
 app.use('/api/approvals', requireUser);
 app.use('/api/action-logs', requireUser);
 app.use('/api/state', requireUser);
@@ -499,6 +500,127 @@ app.get('/api/businesses', wrap(async (req, res) => {
 
 app.get('/api/agents', wrap(async (req, res) => {
   res.json(await readAgents(scopeFor(req.user, req.query.business_id)));
+}));
+
+/**
+ * Which desks this floor has, and which it could have back. A business that
+ * does not sell on marketplaces has no use for a Payments desk, and one that
+ * subcontracts everything has no use for Production — so the floor is not
+ * fixed at ten.
+ */
+app.get('/api/departments', wrap(async (req, res) => {
+  const businessId = assertUuid(req.query.business_id, 'business_id');
+  assertInScope(req.user, businessId);
+  const { rows } = await q(
+    `SELECT r.department, r.role_title,
+            a.id AS agent_id, a.name, a.status, a.removed_at
+       FROM agent_roster() r
+       LEFT JOIN agents a
+              ON a.business_id = $1 AND a.department = r.department
+      ORDER BY r.desk_y, r.desk_x`,
+    [businessId]);
+  res.json({
+    on_floor: rows.filter((d) => d.agent_id && !d.removed_at),
+    off_floor: rows.filter((d) => !d.agent_id || d.removed_at),
+  });
+}));
+
+/**
+ * Take a desk off the floor. The row stays — approvals, action logs and
+ * conversations all name an agent, and deleting it would take that history
+ * with it — but `removed_at` drops it out of every read, so the agent and its
+ * table are simply not there any more.
+ *
+ * A desk mid-job or holding a draft is not removed: that work would be
+ * stranded where nobody could reach it. Say which, and let them finish it.
+ */
+app.delete('/api/agents/:id', wrap(async (req, res) => {
+  const agentId = assertUuid(req.params.id, 'agent_id');
+  const { rows } = await q(
+    `SELECT id, business_id, department, name, status, removed_at
+       FROM agents WHERE id = $1`, [agentId]);
+  const agent = rows[0];
+  if (!agent || agent.removed_at) throw new HttpError(404, 'agent not found');
+  assertInScope(req.user, agent.business_id);
+  requireOwner(req.user, agent.business_id);
+
+  const { rows: waiting } = await q(
+    `SELECT count(*)::int AS pending FROM approvals
+      WHERE agent_id = $1 AND status = 'PENDING'`, [agentId]);
+  if (waiting[0].pending > 0) {
+    throw new HttpError(409,
+      `${agent.name} has ${waiting[0].pending} draft(s) waiting for you — `
+      + 'approve or reject them first');
+  }
+  if (agent.status === 'WORKING') {
+    throw new HttpError(409, `${agent.name} is in the middle of a job`);
+  }
+
+  const out = await tx(async (client) => {
+    const { rows: removed } = await client.query(
+      `UPDATE agents SET removed_at = now(), status = 'IDLE', last_message = NULL
+        WHERE id = $1 AND business_id = ANY($2::uuid[]) AND removed_at IS NULL
+        RETURNING id`,
+      [agentId, req.user.businessIds]);
+    if (!removed[0]) throw new HttpError(404, 'agent not found');
+    await logAction(client, {
+      businessId: agent.business_id,
+      agentId,
+      action: 'DESK_REMOVED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { department: agent.department, name: agent.name },
+    });
+    return { removed: true };
+  });
+  res.json({ ok: true, ...out, department: agent.department });
+}));
+
+/**
+ * Put a desk back, or open one a floor never had. Same row, so it comes back
+ * with the skills and the history it had before; a department that was never
+ * provisioned is created from the roster at its own place on the floor.
+ */
+app.post('/api/agents', wrap(async (req, res) => {
+  const businessId = assertUuid(req.body?.business_id, 'business_id');
+  assertInScope(req.user, businessId);
+  requireOwner(req.user, businessId);
+
+  const department = String(req.body?.department ?? '').trim();
+  const { rows: roster } = await q(
+    `SELECT * FROM agent_roster() WHERE department = $1`, [department]);
+  const desk = roster[0];
+  if (!desk) throw new HttpError(400, 'there is no such desk');
+
+  const out = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO agents
+         (business_id, department, name, role_title, avatar_sprite_key, desk_x, desk_y)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (business_id, department) DO UPDATE
+         SET removed_at = NULL, status = 'IDLE', last_message = NULL
+       RETURNING id, (xmax = 0) AS created`,
+      [businessId, desk.department, desk.department + ' Agent', desk.role_title,
+       desk.sprite, desk.desk_x, desk.desk_y]);
+    const agent = rows[0];
+    // Its skills come back with it; a brand new desk gets the whole set.
+    await client.query(
+      `INSERT INTO agent_skills (agent_id, skill_key)
+       SELECT $1, c.skill_key FROM skill_catalogue c WHERE c.department = $2
+       ON CONFLICT (agent_id, skill_key) DO NOTHING`,
+      [agent.id, desk.department]);
+    await logAction(client, {
+      businessId,
+      agentId: agent.id,
+      action: agent.created ? 'DESK_OPENED' : 'DESK_RESTORED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { department: desk.department },
+    });
+    return agent;
+  });
+
+  res.status(201).json({ ok: true, agent: await readAgent(out.id) });
 }));
 
 app.get('/api/approvals', wrap(async (req, res) => {
@@ -1463,7 +1585,7 @@ async function readProducts(scope, { platform, accountId, limit = 100 } = {}) {
 async function deskFor(businessId, department = 'Inventory') {
   const { rows } = await q(
     `SELECT id FROM agents
-      WHERE business_id = $1
+      WHERE business_id = $1 AND removed_at IS NULL
       ORDER BY (department = $2) DESC, desk_y, desk_x
       LIMIT 1`,
     [businessId, department],
@@ -2142,6 +2264,7 @@ app.post('/api/internal/agents/checkout', wrap(async (req, res) => {
       `SELECT ag.id, ag.business_id, ag.status, b.is_active
          FROM agents ag JOIN businesses b ON b.id = ag.business_id
         WHERE ag.department = $1
+          AND ag.removed_at IS NULL
           AND ($2::uuid IS NULL OR ag.business_id = $2::uuid)
           AND ($3::text IS NULL OR b.code = $3::text)
         FOR UPDATE OF ag`,
@@ -2195,11 +2318,11 @@ app.post('/api/internal/approvals', wrap(async (req, res) => {
 
   const result = await tx(async (client) => {
     const { rows: agents } = await client.query(
-      `SELECT ag.id, ag.business_id, ag.status, b.is_active
+      `SELECT ag.id, ag.business_id, ag.status, ag.removed_at, b.is_active
          FROM agents ag JOIN businesses b ON b.id = ag.business_id
         WHERE ag.id = $1 FOR UPDATE OF ag`, [agentId]);
     const agent = agents[0];
-    if (!agent) return { notFound: true };
+    if (!agent || agent.removed_at) return { notFound: true };
     if (!agent.is_active) return { suspended: true };
     if (agent.status === 'PAUSED') return { paused: true };
 
@@ -2602,8 +2725,12 @@ const stopListening = listen('office_events', async (event) => {
   try {
     if (event.entity === 'agent') {
       const agent = event.op === 'DELETE' ? null : await readAgent(event.id);
+      // A desk taken off the floor is still a row, but to everything that
+      // draws the floor it is gone — so it goes out as a deletion.
       broadcast(event.business_id, 'agent:update',
-        agent ?? { id: event.id, business_id: event.business_id, deleted: true });
+        agent && !agent.removed_at
+          ? agent
+          : { id: event.id, business_id: event.business_id, deleted: true });
     } else if (event.entity === 'approval') {
       const approval = event.op === 'DELETE' ? null : await readApproval(event.id);
       broadcast(event.business_id, 'approval:update',

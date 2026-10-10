@@ -1095,5 +1095,13 @@ export default function VirtualOfficeCanvas({ agents, floor, onSelectAgent }) {
     sceneRef.current?.syncAgents(agents ?? []);
   }, [agents, floor]);
 
-  return <div ref={hostRef} className="w-full overflow-hidden rounded-xl border border-slate-800" />;
+  // On a phone, fitting 1100px of floor into 390 leaves the nameplates
+  // unreadable, so the floor keeps a usable width and the strip scrolls
+  // sideways instead. The page itself never overflows — the scrolling happens
+  // inside this box.
+  return (
+    <div className="w-full overflow-x-auto overflow-y-hidden rounded-xl border border-slate-800">
+      <div ref={hostRef} className="min-w-[680px] sm:min-w-0" />
+    </div>
+  );
 }

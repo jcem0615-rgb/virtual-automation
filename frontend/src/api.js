@@ -59,6 +59,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(platforms ? { platforms } : {}),
     }),
+  // Which desks this floor has, and which it could have back.
+  departments: (businessId) => request(`/api/departments?business_id=${businessId}`),
+  removeDesk: (agentId) => request(`/api/agents/${agentId}`, { method: 'DELETE' }),
+  addDesk: (businessId, department) =>
+    request('/api/agents', {
+      method: 'POST',
+      body: JSON.stringify({ business_id: businessId, department }),
+    }),
+
   setSkill: (agentId, key, enabled) =>
     request(`/api/agents/${agentId}/skills/${key}`, {
       method: 'PATCH',

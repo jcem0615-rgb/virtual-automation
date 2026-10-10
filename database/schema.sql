@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS agents (
   UNIQUE (business_id, department)
 );
 
+-- A business that does not need a department can take its desk away. The row
+-- stays: approvals, action logs and conversations all name an agent, and
+-- deleting it would take that history with it. `removed_at` is what the floor
+-- and every roster read filters on, so the desk and its table simply are not
+-- there — and putting it back is clearing one column, skills and all.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS removed_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS agents_on_floor_idx
+  ON agents (business_id, desk_y, desk_x) WHERE removed_at IS NULL;
+
 -- -------------------------------------------------------------- approvals
 -- The human gate. Nothing is dispatched until a row moves PENDING -> APPROVED.
 
@@ -204,31 +214,38 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES users
 -- The nine desks every business gets, and where they sit on the canvas.
 -- seed.sql and the platform API both go through this, so a floor created from
 -- the portal is laid out exactly like the seeded ones.
+-- The ten desks a floor is laid out with: the five that face outward along
+-- the front, the five that keep the place running behind them. The
+-- coordinates are the floor the canvas draws, so this is the only place the
+-- layout is decided — provisioning a whole floor and putting one removed
+-- desk back both read it.
+CREATE OR REPLACE FUNCTION agent_roster()
+RETURNS TABLE (department text, role_title text, sprite text, desk_x int, desk_y int)
+AS $fn$
+  VALUES
+    ('Sales',      'Sales Agent',        'staff_amber',  124, 330),
+    ('Marketing',  'Marketing Agent',    'staff_rose',   336, 330),
+    ('CRM',        'Customer Care Agent','staff_sky',    548, 330),
+    ('Payments',   'Payment Collector',  'staff_emerald',760, 330),
+    ('Inventory',  'Inventory Agent',    'staff_lime',   972, 330),
+    ('Logistics',  'Dispatch Agent',     'staff_teal',   124, 560),
+    ('Production', 'Operations Agent',   'staff_orange', 336, 560),
+    ('Admin',      'Admin Agent',        'staff_slate',  548, 560),
+    ('HR',         'People Agent',       'staff_violet', 760, 560),
+    ('Security',   'Security Agent',     'staff_red',    972, 560)
+$fn$ LANGUAGE sql IMMUTABLE;
+
 CREATE OR REPLACE FUNCTION provision_business_agents(p_business_id uuid)
 RETURNS integer AS $fn$
 DECLARE
   inserted integer;
 BEGIN
-  -- Ten desks: the five that face outward along the front, the five that keep
-  -- the place running behind them. The coordinates are the floor the canvas
-  -- draws, so this table is the only place the layout is decided.
-  WITH roster (department, role_title, sprite, desk_x, desk_y) AS (
-    VALUES
-      ('Sales',      'Sales Agent',        'staff_amber',  124, 330),
-      ('Marketing',  'Marketing Agent',    'staff_rose',   336, 330),
-      ('CRM',        'Customer Care Agent','staff_sky',    548, 330),
-      ('Payments',   'Payment Collector',  'staff_emerald',760, 330),
-      ('Inventory',  'Inventory Agent',    'staff_lime',   972, 330),
-      ('Logistics',  'Dispatch Agent',     'staff_teal',   124, 560),
-      ('Production', 'Operations Agent',   'staff_orange', 336, 560),
-      ('Admin',      'Admin Agent',        'staff_slate',  548, 560),
-      ('HR',         'People Agent',       'staff_violet', 760, 560),
-      ('Security',   'Security Agent',     'staff_red',    972, 560)
-  )
   INSERT INTO agents (business_id, department, name, role_title, avatar_sprite_key, desk_x, desk_y)
   SELECT p_business_id, r.department, r.department || ' Agent', r.role_title,
          r.sprite, r.desk_x, r.desk_y
-  FROM roster r
+  FROM agent_roster() r
+  -- `removed_at` is deliberately not touched: re-running this must not drag a
+  -- desk its owner took off the floor back onto it.
   ON CONFLICT (business_id, department) DO UPDATE
     SET role_title        = EXCLUDED.role_title,
         avatar_sprite_key = EXCLUDED.avatar_sprite_key,
@@ -241,7 +258,7 @@ BEGIN
   SELECT a.id, c.skill_key
     FROM agents a
     JOIN skill_catalogue c ON c.department = a.department
-   WHERE a.business_id = p_business_id
+   WHERE a.business_id = p_business_id AND a.removed_at IS NULL
   ON CONFLICT (agent_id, skill_key) DO NOTHING;
 
   -- The Payments desk needs a rule per marketplace before it can decide

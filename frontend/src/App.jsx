@@ -15,6 +15,18 @@ import InboxPanel from './components/InboxPanel.jsx';
 import SalesPanel from './components/SalesPanel.jsx';
 import LivePanel from './components/LivePanel.jsx';
 import NewOfficeDialog from './components/NewOfficeDialog.jsx';
+import DesksPanel from './components/DesksPanel.jsx';
+
+// The phone's tab bar. Six, because that is what the app actually does, and
+// the queue comes first because approving is what the app is for.
+const TABS = [
+  { key: 'queue', label: 'Queue', icon: 'M5 13l4 4L19 7' },
+  { key: 'floor', label: 'Floor', icon: 'M3 21V8l9-5 9 5v13M9 21v-6h6v6' },
+  { key: 'inbox', label: 'Inbox', icon: 'M4 5h16v11H8l-4 4V5z' },
+  { key: 'sales', label: 'Sales', icon: 'M4 19h16M7 16V9m5 7V5m5 11v-4' },
+  { key: 'live', label: 'Live', icon: 'M15 10l5-3v10l-5-3v-4zM3 7h12v10H3V7z' },
+  { key: 'market', label: 'Market', icon: 'M4 8h16l-1 12H5L4 8zm4 0V6a4 4 0 118 0v2' },
+];
 
 const STATUS_PILL = {
   IDLE: 'bg-slate-800 text-slate-300',
@@ -40,6 +52,9 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState(null);
   const [error, setError] = useState(null);
   const [opening, setOpening] = useState(false);
+  // On a phone the dashboard is a set of tabs rather than one long scroll:
+  // the queue is what the app is for, so that is where it opens.
+  const [tab, setTab] = useState('queue');
   // Bumped whenever a row anywhere in a collection changes, so the panels that
   // read their own data know to look again. The socket says which collection
   // moved; the panel refetches and gets the committed row, never a guess.
@@ -170,6 +185,11 @@ export default function App() {
     [agents, floorId],
   );
 
+  // A phone shows one tab at a time; a wide screen shows the lot. One class
+  // does both, so there is a single DOM rather than two layouts to keep in
+  // step.
+  const onTab = (name) => (tab === name ? 'block' : 'hidden') + ' lg:block';
+
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
   const selectedApproval = selectedAgentId ? pendingByAgent.get(selectedAgentId) ?? null : null;
   const businessName = (id) => businesses.find((b) => b.id === id)?.name ?? '—';
@@ -237,12 +257,19 @@ export default function App() {
 
   return (
     <div className="min-h-full bg-slate-950">
-      <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4 px-4 py-3">
-          <h1 className="text-lg font-semibold text-slate-100">Virtual Office</h1>
+      <header
+        className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/95 backdrop-blur"
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      >
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 px-3 py-2 sm:gap-4 sm:px-4 sm:py-3">
+          <h1 className="shrink-0 text-base font-semibold text-slate-100 sm:text-lg">
+            {/* On a phone the title is the icon-sized part of the bar. */}
+            <span className="sm:hidden">VO</span>
+            <span className="hidden sm:inline">Virtual Office</span>
+          </h1>
 
-          <label className="flex items-center gap-2 text-sm text-slate-400">
-            Business
+          <label className="flex min-w-0 flex-1 items-center gap-2 text-sm text-slate-400 sm:flex-none">
+            <span className="hidden sm:inline">Business</span>
             <select
               id="biz"
               value={businessId}
@@ -253,7 +280,7 @@ export default function App() {
                 setSelectedAgentId(null);
                 setBusinessId(e.target.value);
               }}
-              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-100 outline-none focus:border-sky-500"
+              className="min-w-0 flex-1 truncate rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-slate-100 outline-none focus:border-sky-500 sm:flex-none sm:px-3"
             >
               {businesses.length > 1 && <option value="all">All businesses</option>}
               {businesses.map((b) => (
@@ -265,34 +292,42 @@ export default function App() {
             </select>
           </label>
 
-          <span className="flex-1" />
+          <span className="hidden flex-1 sm:block" />
 
-          <span className="flex items-center gap-2 text-xs text-slate-400">
+          <span className="flex shrink-0 items-center gap-2 text-xs text-slate-400">
             <span
               className={`h-2 w-2 rounded-full ${
                 connection === 'live' ? 'bg-emerald-400'
                   : connection === 'degraded' ? 'bg-amber-400' : 'bg-red-500'
               }`}
+              title={connection}
             />
-            {connection === 'live' ? 'realtime' : connection}
+            <span className="hidden sm:inline">
+              {connection === 'live' ? 'realtime' : connection}
+            </span>
           </span>
-          <span className="rounded-full bg-amber-950 px-3 py-1 text-xs text-amber-300">
-            {approvals.length} awaiting approval
+          {/* The count is the whole point of the bar on a phone, so it stays —
+              just the word goes. */}
+          <span className="shrink-0 rounded-full bg-amber-950 px-2 py-1 text-xs text-amber-300 sm:px-3">
+            {approvals.length}
+            <span className="hidden sm:inline"> awaiting approval</span>
           </span>
           {user.isPlatformOwner && (
             <button
               onClick={() => setView('auto')}
-              className="rounded-lg border border-amber-900 px-3 py-1.5 text-xs text-amber-300 hover:bg-amber-950/50"
+              className="shrink-0 rounded-lg border border-amber-900 px-2 py-1.5 text-xs text-amber-300 hover:bg-amber-950/50 sm:px-3"
             >
-              Control Room
+              <span className="sm:hidden">CR</span>
+              <span className="hidden sm:inline">Control Room</span>
             </button>
           )}
-          <span className="hidden text-xs text-slate-500 sm:inline">{user.email}</span>
+          <span className="hidden text-xs text-slate-500 lg:inline">{user.email}</span>
           <button
             onClick={signOut}
-            className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+            className="shrink-0 rounded-lg border border-slate-700 px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800 sm:px-3"
           >
-            Sign out
+            <span className="sm:hidden">Out</span>
+            <span className="hidden sm:inline">Sign out</span>
           </button>
         </div>
       </header>
@@ -304,9 +339,12 @@ export default function App() {
       {/* grid-cols-1 matters: an implicit `auto` column sizes to its content,
           so the canvas's own measured width would hold the column open and the
           page could never narrow again. */}
-      <main className="mx-auto grid max-w-7xl grid-cols-1 gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <main
+        className="mx-auto grid max-w-7xl grid-cols-1 gap-4 px-3 py-3 sm:px-4 sm:py-4 lg:grid-cols-[minmax(0,1fr)_340px]"
+        style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 72px)' }}
+      >
         <section className="min-w-0 space-y-4">
-          <div className="min-w-0 space-y-2">
+          <div className={`min-w-0 space-y-2 ${onTab('floor')}`}>
             {businessId === 'all' && businesses.length > 1 && (
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-xs text-slate-500">Floor</span>
@@ -335,48 +373,67 @@ export default function App() {
             />
           </div>
 
-          <InboxPanel
-            businessId={businessId}
-            refreshKey={changed}
-            onSignedOut={signedOut}
-          />
+          <div className={onTab('inbox')}>
+            <InboxPanel
+              businessId={businessId}
+              refreshKey={changed}
+              onSignedOut={signedOut}
+            />
+          </div>
 
-          <PostsPanel
-            businessId={businessId}
-            refreshKey={logs[0]?.id ?? 0}
-            onSignedOut={signedOut}
-          />
+          <div className={onTab('market')}>
+            <PostsPanel
+              businessId={businessId}
+              refreshKey={logs[0]?.id ?? 0}
+              onSignedOut={signedOut}
+            />
+          </div>
 
           {/* Products, shops, sales and a live stream only make sense inside
               one business, so they are hidden on the all-businesses view. */}
           {businessId !== 'all' && (
             <>
-              <SalesPanel
-                businessId={businessId}
-                isOwner={isOwnerHere}
-                refreshKey={changed}
-                onSignedOut={signedOut}
-              />
-              <LivePanel
-                businessId={businessId}
-                isOwner={isOwnerHere}
-                refreshKey={changed}
-                onSignedOut={signedOut}
-              />
-              <ProductsPanel
-                businessId={businessId}
-                isOwner={isOwnerHere}
-                onSignedOut={signedOut}
-              />
-              <AccountsPanel
-                businessId={businessId}
-                isOwner={isOwnerHere}
-                onSignedOut={signedOut}
-              />
+              <div className={onTab('sales')}>
+                <SalesPanel
+                  businessId={businessId}
+                  isOwner={isOwnerHere}
+                  refreshKey={changed}
+                  onSignedOut={signedOut}
+                />
+              </div>
+              <div className={onTab('live')}>
+                <LivePanel
+                  businessId={businessId}
+                  isOwner={isOwnerHere}
+                  refreshKey={changed}
+                  onSignedOut={signedOut}
+                />
+              </div>
+              <div className={`space-y-4 ${onTab('market')}`}>
+                <ProductsPanel
+                  businessId={businessId}
+                  isOwner={isOwnerHere}
+                  onSignedOut={signedOut}
+                />
+                <AccountsPanel
+                  businessId={businessId}
+                  isOwner={isOwnerHere}
+                  onSignedOut={signedOut}
+                />
+              </div>
+              <div className={onTab('floor')}>
+                <DesksPanel
+                  businessId={businessId}
+                  isOwner={isOwnerHere}
+                  refreshKey={changed}
+                  onSignedOut={signedOut}
+                  onChanged={() => load(businessId)}
+                />
+              </div>
             </>
           )}
 
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <div className={`grid gap-2 sm:grid-cols-2 xl:grid-cols-3 ${onTab('floor')}`}>
             {agents.map((agent) => (
               <button
                 key={agent.id}
@@ -398,7 +455,7 @@ export default function App() {
           </div>
         </section>
 
-        <aside className="space-y-4">
+        <aside className={`space-y-4 ${onTab('queue')}`}>
           <div className="rounded-xl border border-slate-800 bg-slate-900">
             <h2 className="border-b border-slate-800 px-4 py-3 text-sm font-medium text-slate-200">
               Pending approvals
@@ -448,6 +505,45 @@ export default function App() {
         </aside>
       </main>
 
+      {/* The tab bar. Phone only — a wide screen shows every section at once,
+          so there is nothing to switch between. */}
+      <nav
+        className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-800 bg-slate-950/95 backdrop-blur lg:hidden"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
+        <div className="flex">
+          {TABS.map((item) => {
+            const active = tab === item.key;
+            const badge = item.key === 'queue' ? approvals.length : 0;
+            return (
+              <button
+                key={item.key}
+                onClick={() => { setTab(item.key); window.scrollTo(0, 0); }}
+                aria-current={active ? 'page' : undefined}
+                className={`relative flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] ${
+                  active ? 'text-sky-300' : 'text-slate-500'
+                }`}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
+                     className="h-5 w-5" aria-hidden="true">
+                  <path d={item.icon} />
+                </svg>
+                {item.label}
+                {badge > 0 && (
+                  <span className="absolute right-[18%] top-1 min-w-[15px] rounded-full bg-amber-500 px-1 text-[9px] font-semibold leading-[15px] text-slate-950">
+                    {badge > 9 ? '9+' : badge}
+                  </span>
+                )}
+                {active && (
+                  <span className="absolute inset-x-4 top-0 h-0.5 rounded-full bg-sky-400" />
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+
       {opening && (
         <NewOfficeDialog
           onClose={() => setOpening(false)}
@@ -482,6 +578,13 @@ export default function App() {
             // The socket carries the agent row back too, but update now so the
             // switch does not sit there looking unmoved.
             setAgents((current) => current.map((a) => (a.id === agentId ? result.agent : a)));
+          })}
+          onRemoveDesk={(agentId) => act(async () => {
+            await api.removeDesk(agentId);
+            // The trigger broadcasts the removal too; dropping it now stops
+            // the floor showing a desk that has just gone.
+            setAgents((current) => current.filter((a) => a.id !== agentId));
+            setChanged((n) => n + 1);
           })}
         />
       )}

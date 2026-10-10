@@ -28,6 +28,7 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `frontend/src/components/SalesPanel.jsx` | Orders, the money behind them, and the floor's rules. |
 | `frontend/src/components/LivePanel.jsx` | The yellow basket, the monitor, live claims. |
 | `frontend/src/components/NewOfficeDialog.jsx` | Opening another floor for another trade. |
+| `frontend/src/components/DesksPanel.jsx` | Which desks the floor has, and which it could have back. |
 | `frontend/public/` | PWA manifest, service worker and icons. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
@@ -167,6 +168,15 @@ the realtime path depends on triggers.
   reviewers cannot both win.
 - **PAUSED always wins.** No side effect (approve, reject, retry) may move a paused agent;
   go through `settleAgent()`.
+- **A desk taken off the floor is not deleted.** `approvals.agent_id` is NOT NULL ON DELETE
+  CASCADE, and action logs and conversations name an agent too, so deleting the row would
+  take that history with it. `DELETE /api/agents/:id` sets `removed_at`; every read filters
+  `removed_at IS NULL`, so the agent and its table are simply not on the floor, and the
+  realtime path sends a removal out as `deleted` rather than as a row to redraw. Checkout
+  and filing both 404 on one, and `deskFor()` never picks one. `POST /api/agents` clears
+  the column — same row, same skills, same place — and `agent_roster()` is the one list
+  both that and `provision_business_agents()` read. A desk mid-job or holding a PENDING
+  draft is refused, because that work would be stranded where nobody could reach it.
 - **These marketplaces have no phone line.** Shopee, Lazada and TikTok Shop give a seller
   chat, a listing and an order feed, and no voice-call API. The inbox says so once at the
   top, the CRM prompt forbids offering a call, and nothing anywhere offers to ring a buyer.
@@ -236,6 +246,14 @@ the realtime path depends on triggers.
   wander the aisles, stop dead). Movement is in `step()`; `routeTo()` keeps people walking
   the aisles between desk blocks rather than over them.
 - Tailwind utility classes only; no separate CSS files beyond `index.css`.
+- **A phone gets its own layout out of the same DOM.** Below `lg` the dashboard is six
+  tabs — Queue, Floor, Inbox, Sales, Live, Market — and `onTab(name)` in `App.jsx` returns
+  `hidden lg:block` for everything that is not the open one, so there is one tree rather
+  than two layouts to keep in step. It opens on Queue because approving is what the app is
+  for. `main` carries `env(safe-area-inset-bottom) + 72px` of bottom padding so the tab bar
+  never covers the last panel. Fitting 1100px of floor into 390 leaves the nameplates
+  unreadable, so the canvas keeps a 680px minimum and its own strip scrolls sideways —
+  the page itself still must not.
 - The dashboard installs as a PWA. `public/sw.js` must never cache `/api` or `/socket.io`
   — a stale approval queue is worse than no app. Bump `VERSION` in it when the shell
   changes. Phaser runs with `expandParent: false`, or it widens its host div and pushes

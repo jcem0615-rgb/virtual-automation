@@ -11,17 +11,20 @@ const CHANNEL_LABEL = {
 
 export default function ApprovalModal({
   agent, approval, canPause = true, onClose, onApprove, onReject, onKill, onToggleSkill,
+  onRemoveDesk,
 }) {
   const [feedback, setFeedback] = useState('');
   const [rejecting, setRejecting] = useState(false);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [skillBusy, setSkillBusy] = useState(null);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     setFeedback('');
     setRejecting(false);
     setError(null);
+    setRemoving(false);
   }, [approval?.id, agent?.id]);
 
   useEffect(() => {
@@ -263,6 +266,45 @@ export default function ApprovalModal({
             </p>
           )}
         </footer>
+
+        {/* Taking the desk away altogether. Separate from pausing on purpose:
+            a pause is for this afternoon, this is for a department the
+            business does not have. */}
+        {canPause && onRemoveDesk && (
+          <div className="border-t border-slate-800 px-5 py-4">
+            {!removing ? (
+              <button
+                onClick={() => { setRemoving(true); setError(null); }}
+                className="text-xs text-slate-500 underline-offset-2 hover:text-red-300 hover:underline"
+              >
+                This office does not need a {agent.department} desk
+              </button>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-xs text-slate-400">
+                  Take {agent.name}&rsquo;s desk off the floor? The desk and the agent go;
+                  what they already did stays in the log, and you can put the desk back
+                  whenever you like.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    disabled={busy !== null}
+                    onClick={() => run('remove', () => onRemoveDesk(agent.id))}
+                    className="rounded-lg bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50"
+                  >
+                    {busy === 'remove' ? 'Removing…' : 'Remove the desk'}
+                  </button>
+                  <button
+                    onClick={() => setRemoving(false)}
+                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
+                  >
+                    Keep it
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
