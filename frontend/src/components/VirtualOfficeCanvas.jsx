@@ -10,8 +10,15 @@
 import { useEffect, useRef } from 'react';
 import Phaser from 'phaser';
 
-const WIDTH = 1100;
-const HEIGHT = 700;
+// The floor the room was drawn for. A wide screen gets exactly this: five
+// desks across, two rows, the lounge and the pantry side by side under the
+// windows. A phone cannot hold that — 1100px squeezed into 390 makes the
+// nameplates unreadable — so below NARROW_AT the same room is rebuilt two
+// desks across and taller, and the page scrolls down instead of across.
+const DESIGN_W = 1100;
+const DESIGN_H = 700;
+const NARROW_AT = 560;
+const NARROW_CELL_H = 188;   // one desk row on a phone, with its aisle
 
 // avatar_sprite_key only selects a colour; the figures are drawn from primitives.
 const SPRITE_COLOURS = {
@@ -153,7 +160,13 @@ const WAYPOINT_RADIUS = 9;      // mid-route corners: near enough is arrived
 // A two-line nameplate is about this big. Two figures closer than this have
 // plates that sit on top of each other, so this is the room separate() keeps.
 const PLATE_W = 96;
-const PLATE_H = 44;
+// The height two plates need to clear each other, which is the two lines of
+// text and no more. Kept tight on purpose: it is the cheap way out of a
+// crossing. Two people meeting head-on in an aisle are a long way apart in x
+// and barely any in y, so stepping around each other costs twenty pixels
+// where backing off costs a hundred — and under a capped nudge, twenty is a
+// gap they can open before their names have covered each other.
+const PLATE_H = 26;
 // A shove is a nudge, never a shunt: capped below walking pace so being
 // jostled can never cancel out the step somebody is taking.
 const NUDGE_SPEED = 46;         // px per second
@@ -162,8 +175,8 @@ const NUDGE_SPEED = 46;         // px per second
 // instead of straight over someone's desk.
 // The lanes people walk down, between the desk blocks rather than over
 // them. One above the front row, one between the two rows, one below.
-const AISLE_ROWS = [245, 450, 655];
-const AISLE_COLS = [230, 442, 654, 866];
+const DESIGN_ROWS = [245, 450, 655];
+const DESIGN_COLS = [230, 442, 654, 866];
 
 const DEPTH = { floor: 0, furniture: 1, people: 5, labels: 12 };
 
@@ -188,6 +201,76 @@ class OfficeScene extends Phaser.Scene {
     this.theme = FLOOR_THEMES.general;
     this.seed = 0;
     this.floorKey = null;
+    this.W = DESIGN_W;
+    this.H = DESIGN_H;
+    this.narrow = false;
+    this.rows = 0;
+    this.cols = 0;
+    // The designed floor until something measures the box and says otherwise.
+    // Set here rather than on first resize, because routeTo() reads them the
+    // moment the first person is placed.
+    this.aisles();
+  }
+
+  /**
+   * Fit the room to the screen it is on.
+   *
+   * A wide screen gets the floor exactly as it was drawn — the desk
+   * coordinates come from `agent_roster()` and are used as given. A phone
+   * gets the same room rebuilt two desks across: the lounge and the pantry
+   * stack instead of sitting side by side, the desks run down the page, and
+   * the aisles move with them. Returns true when anything actually changed,
+   * so a resize that lands in the same shape redraws nothing.
+   */
+  resizeTo(hostWidth, deskCount) {
+    const narrow = hostWidth > 0 && hostWidth < NARROW_AT;
+    const count = Math.max(1, deskCount || this.people.size || 10);
+    const w = narrow ? Math.max(300, Math.round(hostWidth)) : DESIGN_W;
+    const cols = narrow ? 2 : 0;
+    const rows = narrow ? Math.ceil(count / cols) : 0;
+    // On a phone the two rooms stack, so the band above the desks is twice
+    // as deep before the first desk row starts.
+    const deskTop = narrow ? WALL_H + 8 + 150 + 8 + 150 + 26 : 0;
+    const h = narrow ? deskTop + rows * NARROW_CELL_H + 30 : DESIGN_H;
+    if (w === this.W && h === this.H && narrow === this.narrow
+        && rows === this.rows) return false;
+
+    this.W = w;
+    this.H = h;
+    this.narrow = narrow;
+    this.cols = cols;
+    this.rows = rows;
+    this.deskTop = deskTop;
+    this.cellW = narrow ? w / cols : 0;
+    this.aisles();
+    return true;
+  }
+
+  /** Where people walk between the desk blocks, for whichever layout is up. */
+  aisles() {
+    if (!this.narrow) {
+      this.aisleRows = DESIGN_ROWS;
+      this.aisleCols = DESIGN_COLS;
+      return;
+    }
+    this.aisleRows = [this.deskTop - 18];
+    for (let r = 0; r < this.rows; r += 1) {
+      this.aisleRows.push(this.deskTop + r * NARROW_CELL_H + NARROW_CELL_H - 34);
+    }
+    this.aisleCols = [this.cellW];
+  }
+
+  /**
+   * Where this desk stands. On a wide floor that is what the roster says; on
+   * a phone the roster's order is kept but the grid is two wide, so the same
+   * ten departments come down the page in the same sequence.
+   */
+  deskAt(agent, index) {
+    if (!this.narrow) return { x: agent.desk_x ?? 120, y: agent.desk_y ?? 330 };
+    return {
+      x: (index % this.cols) * this.cellW + this.cellW / 2,
+      y: this.deskTop + Math.floor(index / this.cols) * NARROW_CELL_H + 54,
+    };
   }
 
   create() {
@@ -254,28 +337,67 @@ class OfficeScene extends Phaser.Scene {
 
     // Floorboards, running the length of the room, with a seam every plank
     // and a few boards knocked slightly darker so it is not a flat fill.
-    g.fillStyle(t.floor, 1).fillRect(0, 0, WIDTH, HEIGHT);
+    g.fillStyle(t.floor, 1).fillRect(0, 0, this.W, this.H);
     // A warm pool of daylight under the windows, falling off toward the back
     // of the room, so the floor is not one flat colour.
     for (let i = 0; i < 14; i += 1) {
-      g.fillStyle(0xffffff, 0.035 - i * 0.0024).fillRect(0, WALL_H + i * 12, WIDTH, 12);
+      g.fillStyle(0xffffff, 0.035 - i * 0.0024).fillRect(0, WALL_H + i * 12, this.W, 12);
     }
-    for (let y = WALL_H; y < HEIGHT; y += 26) {
-      g.fillStyle(t.floorAlt, this.noise(y) > 0.62 ? 0.5 : 0.22).fillRect(0, y, WIDTH, 26);
-      g.fillStyle(t.floorSeam, 0.5).fillRect(0, y + 25, WIDTH, 1);
+    for (let y = WALL_H; y < this.H; y += 26) {
+      g.fillStyle(t.floorAlt, this.noise(y) > 0.62 ? 0.5 : 0.22).fillRect(0, y, this.W, 26);
+      g.fillStyle(t.floorSeam, 0.5).fillRect(0, y + 25, this.W, 1);
     }
     // Short seams across, so the boards look laid rather than striped.
     g.fillStyle(t.floorSeam, 0.35);
-    for (let y = WALL_H; y < HEIGHT; y += 26) {
-      for (let x = (y / 26) % 2 ? 90 : 210; x < WIDTH; x += 240) g.fillRect(x, y, 1.5, 26);
+    for (let y = WALL_H; y < this.H; y += 26) {
+      for (let x = (y / 26) % 2 ? 90 : 210; x < this.W; x += 240) g.fillRect(x, y, 1.5, 26);
     }
 
     this.drawWalls(g, t);
-    this.drawLounge(40, WALL_H + 8, 430, 150);
-    this.drawPantry(WIDTH - 420, WALL_H + 8, 380, 150);
-    this.drawMeetingTable(WIDTH / 2, 452);
-    this.drawFeature(t);
-    this.drawGreenery(t);
+    if (this.narrow) {
+      // A phone cannot hold a lounge and a pantry side by side — a 170px
+      // lounge has nowhere to put a sofa — so they stack full width, and
+      // everything that lived in the middle of the wide floor moves into
+      // the aisles between the desk rows.
+      this.drawLounge(14, WALL_H + 8, this.W - 28, 150);
+      this.drawPantry(14, WALL_H + 166, this.W - 28, 150);
+      this.drawNarrowProps(t);
+    } else {
+      this.drawLounge(40, WALL_H + 8, 430, 150);
+      this.drawPantry(this.W - 420, WALL_H + 8, 380, 150);
+      this.drawMeetingTable(this.W / 2, 452);
+      this.drawFeature(t, 70, 452);
+      this.drawGreenery(t);
+    }
+  }
+
+  /**
+   * The phone floor's furniture. The same pieces, put where there is room for
+   * them: the business's own kit and a water point sit in the aisles between
+   * desk rows, a meeting table takes the widest gap, and the corner trees go
+   * at the bottom where nobody walks.
+   */
+  drawNarrowProps(t) {
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
+    // Aisle rows, minus the one above the first desk row (that is the way in).
+    const lanes = this.aisleRows.slice(1, -1);
+    const mid = Math.floor(lanes.length / 2);
+
+    if (lanes[0] !== undefined) this.drawFeature(t, 74, lanes[0] + 4);
+    if (lanes[mid] !== undefined && lanes[mid] !== lanes[0]) {
+      this.drawMeetingTable(this.W / 2, lanes[mid] + 6);
+    }
+
+    const wy = lanes.at(-1) !== undefined && lanes.at(-1) !== lanes[mid]
+      ? lanes.at(-1) + 4 : this.H - 70;
+    const wx = this.W - 64;
+    this.box(g, wx - 12, wy - 10, 26, 22, 24, 0xe2e8f0, 0xcbd5e1, 3);
+    g.fillStyle(t.sky, 0.75).fillRoundedRect(wx - 9, wy - 28, 20, 20, 5);
+    this.labelProp(wx, wy + 22, 'water');
+    this.spots.push({ x: wx - 52, y: wy + 8, sit: false, takenBy: null });
+
+    this.plant(g, 34, this.H - 42, 1.2);
+    this.plant(g, this.W - 34, this.H - 42, 1.1, true);
   }
 
   /**
@@ -284,12 +406,17 @@ class OfficeScene extends Phaser.Scene {
    */
   drawWalls(g, t) {
     // The wall itself, with a shadow where it meets the floor.
-    g.fillStyle(t.wall, 1).fillRect(0, 0, WIDTH, WALL_H);
-    g.fillStyle(t.wallDark, 1).fillRect(0, WALL_H - 10, WIDTH, 10);
-    g.fillStyle(0x000000, 0.22).fillRect(0, WALL_H, WIDTH, 14);
+    g.fillStyle(t.wall, 1).fillRect(0, 0, this.W, WALL_H);
+    g.fillStyle(t.wallDark, 1).fillRect(0, WALL_H - 10, this.W, 10);
+    g.fillStyle(0x000000, 0.22).fillRect(0, WALL_H, this.W, 14);
 
     // Glazing: two runs of windows with mullions and a hint of outside.
-    const bays = [[64, 400], [WIDTH - 470, 410]];
+    // A narrow wall gets one run of glass with a pier left beside it: glaze
+    // the whole width and the picture and the clock below have nothing to
+    // hang on.
+    const bays = this.W < 760
+      ? [[36, Math.max(120, this.W - 170)]]
+      : [[64, 400], [this.W - 470, 410]];
     for (const [x, w] of bays) {
       g.fillStyle(t.frame, 1).fillRoundedRect(x - 6, 14, w + 12, WALL_H - 36, 4);
       g.fillStyle(t.sky, 1).fillRect(x, 20, w, WALL_H - 48);
@@ -301,8 +428,12 @@ class OfficeScene extends Phaser.Scene {
       g.fillRect(x, 20 + (WALL_H - 48) / 2 - 2, w, 4);
     }
 
-    // A framed picture and a clock on the solid piece between the bays.
-    const midX = (bays[0][0] + bays[0][1] + bays[1][0]) / 2;
+    // A framed picture and a clock on the solid piece between the bays — or
+    // on the pier beside the glass when there is only one run of it.
+    const pier = bays.at(-1);
+    const midX = bays.length > 1
+      ? (bays[0][0] + bays[0][1] + bays[1][0]) / 2
+      : Math.min(this.W - 46, pier[0] + pier[1] + 66);
     g.fillStyle(t.frame, 1).fillRoundedRect(midX - 34, 26, 68, 46, 3);
     g.fillStyle(t.accent, 0.5).fillRect(midX - 29, 31, 58, 36);
     g.fillStyle(t.wallDark, 1).fillCircle(midX, 92, 13);
@@ -527,10 +658,8 @@ class OfficeScene extends Phaser.Scene {
    * ten desks everywhere; this is what makes a salon's floor not an IT
    * shop's.
    */
-  drawFeature(t) {
+  drawFeature(t, x, y) {
     const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
-    const x = 70;
-    const y = 452;
 
     if (t.feature === 'workbench') {
       // A bench with a pegboard of tools over it.
@@ -625,21 +754,21 @@ class OfficeScene extends Phaser.Scene {
 
     // A long planter box between the two desk rows, which is also what stops
     // the middle of the room looking like a corridor.
-    const px = WIDTH / 2 - 230;
+    const px = this.W / 2 - 230;
     this.box(g, px, 436, 70, 22, 12, FINISH.pot, FINISH.potDark, 4);
     this.plant(g, px + 20, 444, 0.6);
     this.plant(g, px + 50, 446, 0.5, true);
-    this.box(g, WIDTH / 2 + 160, 436, 70, 22, 12, FINISH.pot, FINISH.potDark, 4);
-    this.plant(g, WIDTH / 2 + 180, 444, 0.55, true);
-    this.plant(g, WIDTH / 2 + 210, 446, 0.62);
+    this.box(g, this.W / 2 + 160, 436, 70, 22, 12, FINISH.pot, FINISH.potDark, 4);
+    this.plant(g, this.W / 2 + 180, 444, 0.55, true);
+    this.plant(g, this.W / 2 + 210, 446, 0.62);
 
     // Corner trees, bigger than anything on a desk.
-    this.plant(g, 46, HEIGHT - 54, 1.5);
-    this.plant(g, WIDTH - 46, HEIGHT - 54, 1.4, true);
-    this.plant(g, WIDTH - 44, 418, 1.25);
+    this.plant(g, 46, this.H - 54, 1.5);
+    this.plant(g, this.W - 46, this.H - 54, 1.4, true);
+    this.plant(g, this.W - 44, 418, 1.25);
 
     // A water point, because people walk to one.
-    const wx = WIDTH - 120;
+    const wx = this.W - 120;
     const wy = 452;
     this.box(g, wx - 12, wy - 10, 26, 22, 24, 0xe2e8f0, 0xcbd5e1, 3);
     g.fillStyle(t.sky, 0.75).fillRoundedRect(wx - 9, wy - 28, 20, 20, 5);
@@ -721,11 +850,20 @@ class OfficeScene extends Phaser.Scene {
   /** Called by React whenever the agent list changes. */
   syncAgents(agents) {
     if (!this.ready) { this.pending = agents; return; }
+    this.roster = agents;
+
+    // Roster order — the order `agent_roster()` lays the floor out in — so a
+    // phone's two-wide grid runs the departments down the page in the same
+    // sequence a wide floor runs them across it.
+    const order = [...agents].sort((a, b) =>
+      (a.desk_y ?? 0) - (b.desk_y ?? 0) || (a.desk_x ?? 0) - (b.desk_x ?? 0));
 
     const seen = new Set();
     for (const agent of agents) {
       seen.add(agent.id);
-      const person = this.people.get(agent.id) ?? this.createPerson(agent);
+      const at = this.deskAt(agent, order.findIndex((o) => o.id === agent.id));
+      const person = this.people.get(agent.id) ?? this.createPerson(agent, at);
+      if (person.desk.x !== at.x || person.desk.y !== at.y) this.moveDesk(person, at);
       const changed = person.data.status !== agent.status;
       person.data = agent;
       person.label.setText(agent.name);
@@ -737,11 +875,42 @@ class OfficeScene extends Phaser.Scene {
     }
   }
 
-  createPerson(agent) {
+  /**
+   * The room changed shape. Everybody is put back inside it and started over:
+   * a position from the old floor can be well outside the new one, and the
+   * aisle somebody was walking to is somewhere else now, so following the old
+   * route would walk them straight off the edge.
+   */
+  refit() {
+    for (const person of this.people.values()) {
+      const edge = this.edgeFor(person);
+      person.pos.x = Phaser.Math.Clamp(person.pos.x, edge, this.W - edge);
+      person.pos.y = Phaser.Math.Clamp(person.pos.y, WALL_H + 34, this.H - 44);
+      this.releaseSpot(person);
+      person.path = [];
+      person.target = null;
+      person.resting = false;
+      person.restUntil = 0;
+      this.applyStatus(person, person.data);
+    }
+  }
+
+  /** The floor was rebuilt at another size, so this desk is somewhere else. */
+  moveDesk(person, at) {
+    person.deskArt?.destroy();
+    person.desk = { ...at };
+    person.deskArt = this.drawDesk(at.x, at.y);
+    person.seat = { x: at.x, y: at.y + 30 };
+    person.standSpot = { x: at.x + 56, y: at.y + 38 };
+    this.releaseSpot(person);
+    this.applyStatus(person, person.data);
+  }
+
+  createPerson(agent, at) {
     const colour = SPRITE_COLOURS[agent.avatar_sprite_key] ?? SPRITE_COLOURS.staff_default;
     const skin = SKIN_TONES[Math.abs(hash(agent.id)) % SKIN_TONES.length];
 
-    const desk = { x: agent.desk_x, y: agent.desk_y };
+    const desk = at ?? { x: agent.desk_x, y: agent.desk_y };
     const deskArt = this.drawDesk(desk.x, desk.y);
     // The figure: shadow, legs, torso, arms, head. Parts rotate at the joint,
     // which is why each limb has its origin at the top.
@@ -768,11 +937,11 @@ class OfficeScene extends Phaser.Scene {
     // nameplate carries.
     const label = this.add.text(desk.x, desk.y + 58, agent.name, {
       fontFamily: 'ui-sans-serif, system-ui', fontSize: '11px', color: '#e8eef8',
-      backgroundColor: 'rgba(9,14,26,0.82)', padding: { x: 5, y: 2 },
+      backgroundColor: '#0b1120', padding: { x: 5, y: 2 },
     }).setOrigin(0.5, 0).setDepth(DEPTH.labels);
     const roleLabel = this.add.text(desk.x, desk.y + 72, agent.role_title ?? agent.department, {
       fontFamily: 'ui-monospace, monospace', fontSize: '9px', color: '#9ab0d0',
-      backgroundColor: 'rgba(9,14,26,0.82)', padding: { x: 5, y: 2 },
+      backgroundColor: '#0b1120', padding: { x: 5, y: 2 },
     }).setOrigin(0.5, 0).setDepth(DEPTH.labels);
 
     const statusText = this.add.text(desk.x, desk.y - 6, '', {
@@ -859,10 +1028,15 @@ class OfficeScene extends Phaser.Scene {
    */
   routeTo(person, destination) {
     const from = person.pos;
+    const edge = this.edgeFor(person);
+    destination = {
+      x: Phaser.Math.Clamp(destination.x, edge, this.W - edge),
+      y: Phaser.Math.Clamp(destination.y, WALL_H + 34, this.H - 44),
+    };
     person.path = [];
     if (Math.hypot(destination.x - from.x, destination.y - from.y) > 150) {
-      const aisleY = nearest(AISLE_ROWS, (from.y + destination.y) / 2) + person.laneY;
-      const aisleX = nearest(AISLE_COLS, (from.x + destination.x) / 2) + person.laneX;
+      const aisleY = nearest(this.aisleRows, (from.y + destination.y) / 2) + person.laneY;
+      const aisleX = nearest(this.aisleCols, (from.x + destination.x) / 2) + person.laneX;
       person.path.push({ x: from.x, y: aisleY });
       if (Math.abs(destination.x - from.x) > 200) {
         person.path.push({ x: aisleX, y: aisleY });
@@ -879,6 +1053,15 @@ class OfficeScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * How close to the wall this person may stand: half their own nameplate,
+   * because the plate is the widest thing they carry. Nearer than that and
+   * the name hangs off the edge of the floor.
+   */
+  edgeFor(person) {
+    return Math.max(44, plateWidth(person) / 2 + 4);
+  }
+
   /** Where an idle person goes next: their own desk, or a free seat somewhere. */
   pickWanderTarget(person) {
     this.releaseSpot(person);
@@ -886,8 +1069,9 @@ class OfficeScene extends Phaser.Scene {
     // Half the time they just potter about their own desk.
     if (Math.random() < 0.5) {
       return {
-        x: Phaser.Math.Clamp(person.desk.x + rand(-46, 46), 46, WIDTH - 46),
-        y: Phaser.Math.Clamp(person.desk.y + rand(24, 40), 96, HEIGHT - 60),
+        x: Phaser.Math.Clamp(person.desk.x + rand(-46, 46),
+          this.edgeFor(person), this.W - this.edgeFor(person)),
+        y: Phaser.Math.Clamp(person.desk.y + rand(24, 40), WALL_H + 34, this.H - 60),
       };
     }
 
@@ -895,8 +1079,9 @@ class OfficeScene extends Phaser.Scene {
     // cannot read, so a spot within a plate's width of a taken one is not
     // offered. The cushion stays; nobody sits shoulder to shoulder on it.
     const taken = this.spots.filter((s) => s.takenBy);
+    const room = Math.max(PLATE_W, plateWidth(person));
     const free = this.spots.filter((s) => !s.takenBy && !taken.some(
-      (t) => Math.abs(t.x - s.x) < PLATE_W && Math.abs(t.y - s.y) < PLATE_H));
+      (t) => Math.abs(t.x - s.x) < room && Math.abs(t.y - s.y) < PLATE_H + 14));
     if (!free.length) return { ...person.seat };
 
     const spot = free[Math.floor(rand(0, free.length))];
@@ -957,6 +1142,14 @@ class OfficeScene extends Phaser.Scene {
     // Name directly under the figure, role flush beneath it: one block.
     person.label.setPosition(person.pos.x, person.pos.y + 22);
     person.roleLabel.setPosition(person.pos.x, person.pos.y + 22 + person.label.height);
+    // Two people passing each other will have their plates cross for a moment
+    // — a nudge is capped below walking pace on purpose, so it cannot stop
+    // that happening. What it must not look like is two sets of words mixed
+    // together: the plates are opaque, and the nearer person's sits in front,
+    // so a crossing reads as one card over another and comes apart again.
+    const front = DEPTH.labels + Math.round(person.pos.y) / 10000;
+    person.label.setDepth(front);
+    person.roleLabel.setDepth(front);
     person.statusText.setPosition(person.pos.x, person.pos.y - 46);
     parts.shadow.setVisible(!seated);
 
@@ -1046,11 +1239,10 @@ class OfficeScene extends Phaser.Scene {
         if (parkedA && parkedB) continue;
 
         // Measure in units of the plate, so the space kept is plate-shaped
-        // rather than a circle the width of the widest side. It is kept
-        // whether they are walking or not: two people passing at half a
-        // plate's width have their names printed over each other for as long
-        // as it takes, which is exactly what made the floor unreadable.
-        const roomX = PLATE_W;
+        // rather than a circle the width of the widest side — and sized from
+        // the two plates Phaser actually laid out, because "Customer Care
+        // Agent" needs a good deal more room than a guess would give it.
+        const roomX = Math.max(PLATE_W, (plateWidth(a) + plateWidth(b)) / 2);
         const roomY = PLATE_H;
         let nx = (b.pos.x - a.pos.x) / roomX;
         let ny = (b.pos.y - a.pos.y) / roomY;
@@ -1079,8 +1271,9 @@ class OfficeScene extends Phaser.Scene {
 
   /** Move somebody aside, inside the room, and get them walking again. */
   shove(person, dx, dy, weight, time) {
-    person.pos.x = Phaser.Math.Clamp(person.pos.x + dx * weight, 44, WIDTH - 44);
-    person.pos.y = Phaser.Math.Clamp(person.pos.y + dy * weight, WALL_H + 34, HEIGHT - 44);
+    const edge = this.edgeFor(person);
+    person.pos.x = Phaser.Math.Clamp(person.pos.x + dx * weight, edge, this.W - edge);
+    person.pos.y = Phaser.Math.Clamp(person.pos.y + dy * weight, WALL_H + 34, this.H - 44);
     // Being jostled while you are stood about is a reason to move on, not to
     // stand there being jostled.
     if (person.task === 'WANDER' && !person.target && !person.resting) {
@@ -1102,6 +1295,11 @@ class OfficeScene extends Phaser.Scene {
     parts.marker.setScale(1);
     parts.marker.y = -36;
   }
+}
+
+/** How wide this person's nameplate actually came out, in pixels. */
+function plateWidth(person) {
+  return Math.max(person.label.width, person.roleLabel.width) + 10;
 }
 
 /** Parked: sat at their own desk, or sat down somewhere on a break. */
@@ -1134,8 +1332,8 @@ export default function VirtualOfficeCanvas({ agents, floor, onSelectAgent }) {
     const game = new Phaser.Game({
       type: Phaser.AUTO,
       parent: hostRef.current,
-      width: WIDTH,
-      height: HEIGHT,
+      width: scene.W,
+      height: scene.H,
       backgroundColor: '#1b2334',
       scale: {
         mode: Phaser.Scale.FIT,
@@ -1151,6 +1349,45 @@ export default function VirtualOfficeCanvas({ agents, floor, onSelectAgent }) {
     return () => { game.destroy(true); gameRef.current = null; sceneRef.current = null; };
   }, []);
 
+  // Fit the room to the box it is in. A wide screen gets the floor as drawn;
+  // a phone gets it rebuilt two desks across. Watched rather than measured
+  // once, because the Floor tab is hidden until it is tapped — a hidden box
+  // measures zero, and the observer fires the moment it is shown.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || typeof ResizeObserver === 'undefined') return undefined;
+    const fit = () => {
+      const scene = sceneRef.current;
+      const width = host.clientWidth;
+      if (!scene?.ready || !width) return;
+      const changed = scene.resizeTo(width, (agents ?? []).length);
+      // The box needs a height of its own. Phaser's FIT scales the floor to
+      // its parent, and the parent's height comes from the canvas inside it —
+      // so while the Floor tab is closed the box is zero tall, FIT scales to
+      // zero, and opening the tab shows nothing at all. Setting the height to
+      // the floor's own aspect at this width breaks that circle.
+      host.style.height = `${Math.round(scene.H * (width / scene.W))}px`;
+      if (!changed) { gameRef.current?.scale.refresh(); return; }
+      scene.drawRoom();
+      scene.syncAgents(scene.roster ?? agents ?? []);
+      scene.refit();
+      // Resized on the next frame, once the browser has actually given the
+      // box the height set above: Phaser scales the floor to its parent, and
+      // measuring that parent before the layout lands fits it to the old one.
+      requestAnimationFrame(() => {
+        // setGameSize, not resize: under FIT the game's own size is fixed and
+        // resize() only touches the canvas, leaving the floor scaled to the
+        // dimensions it was built with.
+        gameRef.current?.scale.setGameSize(scene.W, scene.H);
+        gameRef.current?.scale.refresh();
+      });
+    };
+    const observer = new ResizeObserver(fit);
+    observer.observe(host);
+    fit();
+    return () => observer.disconnect();
+  }, [agents]);
+
   // Which office this is, then who is in it. The order matters: the room is
   // rebuilt first so the people are placed in the room they are actually in.
   useEffect(() => {
@@ -1158,13 +1395,11 @@ export default function VirtualOfficeCanvas({ agents, floor, onSelectAgent }) {
     sceneRef.current?.syncAgents(agents ?? []);
   }, [agents, floor]);
 
-  // On a phone, fitting 1100px of floor into 390 leaves the nameplates
-  // unreadable, so the floor keeps a usable width and the strip scrolls
-  // sideways instead. The page itself never overflows — the scrolling happens
-  // inside this box.
+  // The floor fits the box it is given at every width — two desks across on
+  // a phone, five on a laptop — so nothing here ever scrolls sideways.
   return (
-    <div className="w-full overflow-x-auto overflow-y-hidden rounded-xl border border-slate-800">
-      <div ref={hostRef} className="min-w-[680px] sm:min-w-0" />
+    <div className="w-full overflow-hidden rounded-xl border border-slate-800">
+      <div ref={hostRef} className="w-full" />
     </div>
   );
 }

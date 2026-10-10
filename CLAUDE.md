@@ -252,21 +252,39 @@ the realtime path depends on triggers.
   two at once stands one business's staff inside another's; `App.jsx` scopes the agents and
   passes the business as `floor`, and `FLOOR_THEMES` picks the boards, walls, accent and
   the one piece of kit that says what the business does.
+- **The floor fits the box it is given.** Above `NARROW_AT` it is the room as designed —
+  `DESIGN_W` × `DESIGN_H`, five desks across at the coordinates `agent_roster()` gives,
+  scaled to the box by Phaser's `FIT`. Below it the same room is rebuilt two desks across
+  and taller: `resizeTo()` works out the shape, `deskAt()` places each desk by its roster
+  index instead of its stored coordinates, the lounge and pantry stack because a 170px
+  lounge cannot hold a sofa, and `drawNarrowProps()` puts the feature and the water point
+  in the aisles. Scrolling down a page is what a phone is for; scrolling across it is not.
+  Three things that cost an afternoon each: the box needs an explicit height or `FIT`
+  scales the floor to a parent that is zero tall while the tab is closed and the canvas
+  vanishes; `scale.setGameSize()` is what changes the floor under `FIT` (`resize()` only
+  touches the canvas); and `refit()` has to run after a reflow, because a position and a
+  route from the old floor point somewhere the new one does not have.
 - Agent statuses: `IDLE | WORKING | AWAITING_APPROVAL | PAUSED`.
   Approval statuses: `PENDING | APPROVED | REJECTED`. Both are CHECK-constrained; add a
   value in `schema.sql` first.
 - Approval `payload_json` shape: `{ type, title, draft, channel, recipient, source, … }`.
   `source` is the original request and is what gets replayed on reject. `channel`
   (`email`, `meta_dm`, `shopee`) drives routing in the dispatch workflow.
-- Each figure carries a two-line plate: name, then `role_title`. The plates have a
-  background on purpose — two people standing close used to produce unreadable overlapping
-  text. `separate()` keeps a plate-shaped box (`PLATE_W` × `PLATE_H`) clear between any two
-  people, walking or not, because a plate printed over another plate is unreadable for as
-  long as the pass takes. The nudge that does it is capped at `NUDGE_SPEED`, under walking
-  pace, and that cap is the point: an uncapped push moved people further in one frame than
-  a step did, so two people meeting at the same aisle corner shoved each other back and
-  forth for ever and the floor looked frozen. Each person also carries a fixed `laneX` /
-  `laneY` so no two route through the identical waypoint in the first place.
+- Each figure carries a two-line plate: name, then `role_title`. `separate()` keeps a
+  plate-shaped box clear between any two people, walking or not — sized from the plates
+  Phaser actually laid out (`plateWidth()`), because "Customer Care Agent" needs a good
+  deal more room than `PLATE_W` would guess. `PLATE_H` is deliberately tight: stepping
+  around somebody costs twenty pixels of height where backing off costs a hundred of
+  width, so the cheap way out is the vertical one. The nudge is capped at `NUDGE_SPEED`,
+  **under** walking pace, and that cap is the point in both directions: an uncapped push
+  moved people further in one frame than a step did, so two meeting at the same aisle
+  corner shoved each other back and forth for ever; a push above walking pace instead
+  stops a walker ever reaching a spot next to somebody. Under that cap a crossing will
+  overlap for a second or so and cannot be prevented — so the plates are opaque and
+  depth-sorted by `y`, and a crossing reads as one card in front of another rather than
+  two sets of words mixed together. Each person also carries a fixed `laneX` / `laneY` so
+  no two route through the identical waypoint in the first place, and `edgeFor()` keeps
+  everyone half a plate off the wall so a name never hangs over the edge.
 - Phaser owns the canvas; React never re-renders it. Push data in through
   `scene.syncAgents(agents)`. To add a visual state, extend `applyStatus()` — that is
   also where a status decides what the figure *does* (sit at the desk, stand beside it,
@@ -278,9 +296,8 @@ the realtime path depends on triggers.
   `hidden lg:block` for everything that is not the open one, so there is one tree rather
   than two layouts to keep in step. It opens on Queue because approving is what the app is
   for. `main` carries `env(safe-area-inset-bottom) + 72px` of bottom padding so the tab bar
-  never covers the last panel. Fitting 1100px of floor into 390 leaves the nameplates
-  unreadable, so the canvas keeps a 680px minimum and its own strip scrolls sideways —
-  the page itself still must not.
+  never covers the last panel. The floor reflows to the width it is given (see the canvas
+  note above), so nothing scrolls sideways — not the strip and not the page.
 - The dashboard installs as a PWA. `public/sw.js` must never cache `/api` or `/socket.io`
   — a stale approval queue is worse than no app. Bump `VERSION` in it when the shell
   changes. Phaser runs with `expandParent: false`, or it widens its host div and pushes
