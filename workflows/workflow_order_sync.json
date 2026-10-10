@@ -1,5 +1,5 @@
 {
-  "name": "Order & Payment Sync → Payments Desk",
+  "name": "Order & Payment Sync \u2192 Payments Desk",
   "active": false,
   "settings": {
     "executionOrder": "v1"
@@ -25,6 +25,31 @@
         -120
       ],
       "notes": "Orders, then the money behind them. They are two different events, days apart, so they are read separately and joined by order id."
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.BACKEND_URL }}/api/internal/live/sessions?status=LIVE",
+        "method": "GET",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d2000000-0000-4000-8000-00000000001f",
+      "name": "Open Rooms",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1070,
+        -120
+      ],
+      "notes": "Which shops are live right now. An order placed on an account while that account is streaming is a live sale, and is filed against the stream rather than the shopfront."
     },
     {
       "parameters": {
@@ -256,7 +281,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// One shape for all three. The important part is what counts as paid, and the\n// three disagree about the words while agreeing about the substance:\n//\n//   Shopee   UNPAID -> READY_TO_SHIP -> SHIPPED -> COMPLETED\n//   Lazada   unpaid -> pending -> ready_to_ship -> shipped -> delivered\n//   TikTok   UNPAID -> AWAITING_SHIPMENT -> IN_TRANSIT -> DELIVERED\n//\n// Cash on delivery is a payment method, not a status: a COD order is shipped\n// while it is still unpaid, and only becomes money when the courier hands it\n// over. That is why the method is carried through rather than guessed from\n// the status.\nconst item = $('One Shop Each').item.json;\nconst body = $input.item.json;\nconst out = [];\n\nconst STATUS = {\n  UNPAID: 'UNPAID', TO_CONFIRM_RECEIVE: 'SHIPPED', READY_TO_SHIP: 'READY_TO_SHIP',\n  PROCESSED: 'READY_TO_SHIP', SHIPPED: 'SHIPPED', COMPLETED: 'DELIVERED',\n  CANCELLED: 'CANCELLED', INVOICE_PENDING: 'PAID',\n  unpaid: 'UNPAID', pending: 'PAID', packed: 'READY_TO_SHIP', ready_to_ship: 'READY_TO_SHIP',\n  shipped: 'SHIPPED', delivered: 'DELIVERED', canceled: 'CANCELLED', returned: 'RETURNED',\n  AWAITING_SHIPMENT: 'PAID', AWAITING_COLLECTION: 'READY_TO_SHIP',\n  IN_TRANSIT: 'SHIPPED', DELIVERED: 'DELIVERED', COMPLETE: 'DELIVERED',\n};\nconst method = (raw) => {\n  const text = String(raw ?? '').toLowerCase();\n  if (!text) return 'unknown';\n  if (text.includes('cod') || text.includes('cash on delivery')) return 'cod';\n  if (text.includes('wallet') || text.includes('gcash') || text.includes('paymaya')) return 'wallet';\n  if (text.includes('bank') || text.includes('transfer')) return 'bank_transfer';\n  if (text.includes('instal')) return 'installment';\n  return 'online';\n};\nconst push = (o) => out.push({ json: { business_id: item.business_id,\n  account_id: item.account_id, source: 'shop', ...o } });\n\nif (item.platform === 'shopee') {\n  for (const o of body?.response?.order_list ?? []) {\n    push({\n      external_id: String(o.order_sn), order_no: String(o.order_sn),\n      buyer_name: o.buyer_username ?? 'Buyer',\n      status: STATUS[o.order_status] ?? 'UNPAID',\n      total: Number(o.total_amount ?? 0), currency: o.currency ?? 'PHP',\n      placed_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,\n      payment: { method: method(o.payment_method),\n                 state: STATUS[o.order_status] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW' },\n      items: (o.item_list ?? []).map((i) => ({\n        sku: i.model_sku || i.item_sku, name: i.item_name,\n        qty: Number(i.model_quantity_purchased ?? 1),\n        unit_price: Number(i.model_discounted_price ?? i.model_original_price ?? 0) })),\n    });\n  }\n} else if (item.platform === 'lazada') {\n  for (const o of body?.data?.orders ?? []) {\n    const raw = Array.isArray(o.statuses) ? o.statuses[0] : o.statuses;\n    push({\n      external_id: String(o.order_id), order_no: String(o.order_number ?? o.order_id),\n      buyer_name: [o.customer_first_name, o.customer_last_name].filter(Boolean).join(' ') || 'Buyer',\n      status: STATUS[raw] ?? 'UNPAID',\n      total: Number(o.price ?? 0), currency: 'PHP',\n      placed_at: o.created_at ?? null,\n      payment: { method: method(o.payment_method),\n                 state: STATUS[raw] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW' },\n      // Lazada returns lines on /order/items/get; until that call is made the\n      // order is recorded without them rather than with invented ones.\n      items: [],\n    });\n  }\n} else if (item.platform === 'tiktok') {\n  for (const o of body?.data?.orders ?? []) {\n    push({\n      external_id: String(o.id), order_no: String(o.id),\n      buyer_name: o.recipient_address?.name ?? 'Buyer',\n      status: STATUS[o.status] ?? 'UNPAID',\n      total: Number(o.payment?.total_amount ?? 0),\n      currency: o.payment?.currency ?? 'PHP',\n      placed_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,\n      payment: {\n        method: o.payment_method_name ? method(o.payment_method_name) : 'online',\n        state: STATUS[o.status] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW',\n        gross: Number(o.payment?.sub_total ?? 0),\n        shipping_fee: Number(o.payment?.shipping_fee ?? 0),\n      },\n      items: (o.line_items ?? []).map((i) => ({\n        sku: i.seller_sku, name: i.product_name, qty: 1,\n        unit_price: Number(i.sale_price ?? 0) })),\n    });\n  }\n}\nreturn out;\n"
+        "jsCode": "// One shape for all three. The important part is what counts as paid, and the\n// three disagree about the words while agreeing about the substance:\n//\n//   Shopee   UNPAID -> READY_TO_SHIP -> SHIPPED -> COMPLETED\n//   Lazada   unpaid -> pending -> ready_to_ship -> shipped -> delivered\n//   TikTok   UNPAID -> AWAITING_SHIPMENT -> IN_TRANSIT -> DELIVERED\n//\n// Cash on delivery is a payment method, not a status: a COD order is shipped\n// while it is still unpaid, and only becomes money when the courier hands it\n// over. That is why the method is carried through rather than guessed from\n// the status.\nconst item = $('One Shop Each').item.json;\nconst body = $input.item.json;\nconst out = [];\n\nconst STATUS = {\n  UNPAID: 'UNPAID', TO_CONFIRM_RECEIVE: 'SHIPPED', READY_TO_SHIP: 'READY_TO_SHIP',\n  PROCESSED: 'READY_TO_SHIP', SHIPPED: 'SHIPPED', COMPLETED: 'DELIVERED',\n  CANCELLED: 'CANCELLED', INVOICE_PENDING: 'PAID',\n  unpaid: 'UNPAID', pending: 'PAID', packed: 'READY_TO_SHIP', ready_to_ship: 'READY_TO_SHIP',\n  shipped: 'SHIPPED', delivered: 'DELIVERED', canceled: 'CANCELLED', returned: 'RETURNED',\n  AWAITING_SHIPMENT: 'PAID', AWAITING_COLLECTION: 'READY_TO_SHIP',\n  IN_TRANSIT: 'SHIPPED', DELIVERED: 'DELIVERED', COMPLETE: 'DELIVERED',\n};\nconst method = (raw) => {\n  const text = String(raw ?? '').toLowerCase();\n  if (!text) return 'unknown';\n  if (text.includes('cod') || text.includes('cash on delivery')) return 'cod';\n  if (text.includes('wallet') || text.includes('gcash') || text.includes('paymaya')) return 'wallet';\n  if (text.includes('bank') || text.includes('transfer')) return 'bank_transfer';\n  if (text.includes('instal')) return 'installment';\n  return 'online';\n};\n// Which of this shop's streams, if any, is on air. TikTok Shop's order API\n// does not hand back the room an order was bought in, so the thing that is\n// actually knowable is used instead: the shop is live, and the order was\n// placed after the stream started. That is what a seller means by a live sale,\n// and the backend will not guess any further than this \u2014 two rooms open on one\n// shop and the order stays a shopfront order rather than going to the wrong\n// stream.\nconst rooms = ($('Open Rooms').first().json.sessions ?? [])\n  .filter((s) => s.account_id === item.account_id);\nconst roomFor = (placedAt) => {\n  if (rooms.length !== 1) return null;\n  const room = rooms[0];\n  if (!room.started_at) return null;\n  const placed = placedAt ? Date.parse(placedAt) : Date.now();\n  return Number.isFinite(placed) && placed >= Date.parse(room.started_at) ? room : null;\n};\n\nconst push = (o) => {\n  const room = roomFor(o.placed_at);\n  out.push({ json: {\n    business_id: item.business_id, account_id: item.account_id,\n    source: room ? 'live' : 'shop',\n    ...(room ? { live_session_id: room.id, live_room_id: room.external_id ?? null } : {}),\n    ...o,\n  } });\n};\n\nif (item.platform === 'shopee') {\n  for (const o of body?.response?.order_list ?? []) {\n    push({\n      external_id: String(o.order_sn), order_no: String(o.order_sn),\n      buyer_name: o.buyer_username ?? 'Buyer',\n      status: STATUS[o.order_status] ?? 'UNPAID',\n      total: Number(o.total_amount ?? 0), currency: o.currency ?? 'PHP',\n      placed_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,\n      payment: { method: method(o.payment_method),\n                 state: STATUS[o.order_status] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW' },\n      items: (o.item_list ?? []).map((i) => ({\n        sku: i.model_sku || i.item_sku, name: i.item_name,\n        qty: Number(i.model_quantity_purchased ?? 1),\n        unit_price: Number(i.model_discounted_price ?? i.model_original_price ?? 0) })),\n    });\n  }\n} else if (item.platform === 'lazada') {\n  for (const o of body?.data?.orders ?? []) {\n    const raw = Array.isArray(o.statuses) ? o.statuses[0] : o.statuses;\n    push({\n      external_id: String(o.order_id), order_no: String(o.order_number ?? o.order_id),\n      buyer_name: [o.customer_first_name, o.customer_last_name].filter(Boolean).join(' ') || 'Buyer',\n      status: STATUS[raw] ?? 'UNPAID',\n      total: Number(o.price ?? 0), currency: 'PHP',\n      placed_at: o.created_at ?? null,\n      payment: { method: method(o.payment_method),\n                 state: STATUS[raw] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW' },\n      // Lazada returns lines on /order/items/get; until that call is made the\n      // order is recorded without them rather than with invented ones.\n      items: [],\n    });\n  }\n} else if (item.platform === 'tiktok') {\n  for (const o of body?.data?.orders ?? []) {\n    push({\n      external_id: String(o.id), order_no: String(o.id),\n      buyer_name: o.recipient_address?.name ?? 'Buyer',\n      status: STATUS[o.status] ?? 'UNPAID',\n      total: Number(o.payment?.total_amount ?? 0),\n      currency: o.payment?.currency ?? 'PHP',\n      placed_at: o.create_time ? new Date(o.create_time * 1000).toISOString() : null,\n      payment: {\n        method: o.payment_method_name ? method(o.payment_method_name) : 'online',\n        state: STATUS[o.status] === 'UNPAID' ? 'AWAITING' : 'IN_ESCROW',\n        gross: Number(o.payment?.sub_total ?? 0),\n        shipping_fee: Number(o.payment?.shipping_fee ?? 0),\n      },\n      items: (o.line_items ?? []).map((i) => ({\n        sku: i.seller_sku, name: i.product_name, qty: 1,\n        unit_price: Number(i.sale_price ?? 0) })),\n    });\n  }\n}\nreturn out;\n"
       },
       "id": "d2000000-0000-4000-8000-000000000011",
       "name": "Normalise Orders",
@@ -300,7 +325,7 @@
         600,
         -120
       ],
-      "notes": "The backend decides from the floor’s own rule whether this is the moment the stock leaves the shelf. 423 means the floor is suspended."
+      "notes": "The backend decides from the floor\u2019s own rule whether this is the moment the stock leaves the shelf. 423 means the floor is suspended."
     },
     {
       "parameters": {
@@ -593,7 +618,7 @@
         600,
         420
       ],
-      "notes": "The backend compares the transfer against the orders in it and marks the payout SHORT with the figure if they disagree by more than the floor’s tolerance."
+      "notes": "The backend compares the transfer against the orders in it and marks the payout SHORT with the figure if they disagree by more than the floor\u2019s tolerance."
     },
     {
       "parameters": {
@@ -614,7 +639,7 @@
         -1180,
         900
       ],
-      "notes": "The Payment Collector’s round: orders that were placed and never paid for."
+      "notes": "The Payment Collector\u2019s round: orders that were placed and never paid for."
     },
     {
       "parameters": {
@@ -682,11 +707,11 @@
         -520,
         900
       ],
-      "notes": "The floor’s own rule decides what counts as overdue: how long to wait before a nudge, and how long before the order is given up on."
+      "notes": "The floor\u2019s own rule decides what counts as overdue: how long to wait before a nudge, and how long before the order is given up on."
     },
     {
       "parameters": {
-        "jsCode": "// Only the ones inside the chasing window. An order past the cancel mark is\n// not nudged again — it is left for the owner to cancel, because cancelling\n// somebody's order is not a thing a bot should do on a timer.\nconst body = $input.item.json;\nreturn (body.chase ?? []).map((o) => ({ json: { order_id: o.id, order_no: o.order_no,\n  buyer: o.buyer_name, minutes_old: Math.round(Number(o.minutes_old)) } }));\n"
+        "jsCode": "// Only the ones inside the chasing window. An order past the cancel mark is\n// not nudged again \u2014 it is left for the owner to cancel, because cancelling\n// somebody's order is not a thing a bot should do on a timer.\nconst body = $input.item.json;\nreturn (body.chase ?? []).map((o) => ({ json: { order_id: o.id, order_no: o.order_no,\n  buyer: o.buyer_name, minutes_old: Math.round(Number(o.minutes_old)) } }));\n"
       },
       "id": "d2000000-0000-4000-8000-000000000029",
       "name": "One Overdue Each",
@@ -737,7 +762,7 @@
       "main": [
         [
           {
-            "node": "Selling Accounts",
+            "node": "Open Rooms",
             "type": "main",
             "index": 0
           }
@@ -1044,6 +1069,17 @@
         [
           {
             "node": "File A Nudge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Rooms": {
+      "main": [
+        [
+          {
+            "node": "Selling Accounts",
             "type": "main",
             "index": 0
           }

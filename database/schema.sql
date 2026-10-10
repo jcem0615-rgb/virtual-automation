@@ -786,6 +786,23 @@ CREATE INDEX IF NOT EXISTS live_claims_session_idx
 CREATE INDEX IF NOT EXISTS live_claims_open_idx
   ON live_claims (business_id, status) WHERE status IN ('HELD','CHECKOUT_SENT');
 
+-- An order out of a live room belongs to the room it came out of. On TikTok
+-- the viewer taps the basket and checks out inside the stream, so the order
+-- arrives through the ordinary order feed carrying the room's id; this is what
+-- ties it back, and it is what makes a stream's takings the stream's rather
+-- than just more of the shop's.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS live_session_id uuid
+  REFERENCES live_sessions(id) ON DELETE SET NULL;
+-- Counted into the basket once, however many times the order re-syncs — the
+-- same trick stock_taken_at plays, for the same reason.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS live_counted_at timestamptz;
+CREATE INDEX IF NOT EXISTS orders_live_session_idx
+  ON orders (live_session_id, placed_at DESC) WHERE live_session_id IS NOT NULL;
+-- Finding the session that is in a given room, which is how an order's room
+-- id becomes a session id.
+CREATE INDEX IF NOT EXISTS live_sessions_room_idx
+  ON live_sessions (account_id, external_id) WHERE external_id IS NOT NULL;
+
 DROP TRIGGER IF EXISTS live_sessions_touch ON live_sessions;
 CREATE TRIGGER live_sessions_touch
   BEFORE UPDATE ON live_sessions

@@ -72,12 +72,165 @@ function readQty(line) {
   return Number.isFinite(n) && n > 0 && n <= 20 ? n : 1;
 }
 
+/**
+ * Tie an order that came out of a live room to the session it came out of,
+ * and move the basket to match.
+ *
+ * This is the whole point of connecting a stream. On TikTok the viewer taps
+ * the yellow basket and checks out inside the stream, so nobody has to type
+ * anything here: the order turns up in the ordinary order feed carrying the
+ * room's id, and this is what turns that id back into "slot 3 just sold two".
+ * On Facebook there is no basket to tap — Meta retired Live Shopping — so the
+ * only orders that reach this are ones the seller raised from a claim, which
+ * is why a claim can carry an order id without one ever arriving.
+ *
+ * The order is the truth, not the claim. A claim is a promise someone made in
+ * the comments; an order is money. So a matching claim is settled and its hold
+ * released, and the sold count comes from the order's own lines — never from
+ * both, or one sale would read as two.
+ *
+ * Runs inside the caller's transaction, and counts an order once: a re-sync
+ * sets the link again and moves nothing.
+ */
+export async function attachOrderToLive(client, {
+  businessId, accountId, orderId, status, source, hint = {}, buyerHandle = null,
+}) {
+  const sessionId = await findLiveSession(client, { businessId, accountId, source, hint });
+  if (!sessionId) return null;
+
+  const { rows: orders } = await client.query(
+    `UPDATE orders SET live_session_id = $2, source = 'live'
+      WHERE id = $1 AND business_id = $3
+      RETURNING live_counted_at`,
+    [orderId, sessionId, businessId]);
+  if (!orders[0]) return null;
+  const counted = orders[0].live_counted_at !== null;
+
+  // Cancelled or returned, it is not a sale any more. If it was counted, it
+  // comes back out — a room that oversold because of a cancellation would
+  // stop taking claims for stock it still has.
+  const keeps = !['CANCELLED', 'RETURNED'].includes(String(status ?? '').toUpperCase());
+  if (!keeps) {
+    if (!counted) return { session_id: sessionId, counted: false };
+    await moveSold(client, sessionId, orderId, -1);
+    await client.query(`UPDATE orders SET live_counted_at = NULL WHERE id = $1`, [orderId]);
+    return { session_id: sessionId, counted: false, reversed: true };
+  }
+
+  const settled = await settleClaimsForOrder(client, {
+    sessionId, orderId, businessId, buyerHandle,
+  });
+  if (counted) return { session_id: sessionId, counted: true, claims: settled };
+
+  const slots = await moveSold(client, sessionId, orderId, +1);
+  await client.query(`UPDATE orders SET live_counted_at = now() WHERE id = $1`, [orderId]);
+  return { session_id: sessionId, counted: true, slots, claims: settled };
+}
+
+/**
+ * Which session an order belongs to. Told outright, matched on the room id,
+ * or — only when the order says it came from a live and the account is in
+ * exactly one room — inferred. Two rooms open on one account and it is not
+ * guessed: an order filed against the wrong stream is worse than one filed
+ * against none.
+ */
+async function findLiveSession(client, { businessId, accountId, source, hint }) {
+  if (hint.session_id) {
+    const { rows } = await client.query(
+      `SELECT id FROM live_sessions WHERE id = $1 AND business_id = $2`,
+      [hint.session_id, businessId]);
+    return rows[0]?.id ?? null;
+  }
+  const room = String(hint.room_id ?? '').trim();
+  if (room) {
+    const { rows } = await client.query(
+      `SELECT id FROM live_sessions
+        WHERE business_id = $1 AND external_id = $2
+          AND ($3::uuid IS NULL OR account_id = $3 OR account_id IS NULL)
+        ORDER BY started_at DESC NULLS LAST LIMIT 1`,
+      [businessId, room, accountId ?? null]);
+    if (rows[0]) return rows[0].id;
+  }
+  if (source !== 'live') return null;
+  const { rows } = await client.query(
+    `SELECT id FROM live_sessions
+      WHERE business_id = $1 AND status IN ('LIVE', 'PAUSED')
+        AND ($2::uuid IS NULL OR account_id = $2)
+      ORDER BY started_at DESC NULLS LAST LIMIT 2`,
+    [businessId, accountId ?? null]);
+  return rows.length === 1 ? rows[0].id : null;
+}
+
+/** Move `sold` on every basket slot this order bought, by the order's own qty. */
+async function moveSold(client, sessionId, orderId, sign) {
+  const { rows } = await client.query(
+    `UPDATE live_basket_items b
+        SET sold = GREATEST(0, b.sold + $3 * line.qty)
+       FROM (SELECT i.product_id, sum(i.qty)::int AS qty
+               FROM order_items i
+              WHERE i.order_id = $2 AND i.product_id IS NOT NULL
+              GROUP BY i.product_id) AS line
+      WHERE b.session_id = $1 AND b.product_id = line.product_id
+      RETURNING b.slot, line.qty`,
+    [sessionId, orderId, sign]);
+  return rows.map((r) => ({ slot: r.slot, qty: r.qty * sign }));
+}
+
+/**
+ * Close the promises this order made good on. A claim matches by the handle
+ * that made it when the order carries one; failing that, the oldest open claim
+ * on the same item, which is the person who asked first.
+ *
+ * The hold is released, not converted: `sold` is the order's job above.
+ */
+async function settleClaimsForOrder(client, { sessionId, orderId, businessId, buyerHandle }) {
+  const handle = String(buyerHandle ?? '').trim().toLowerCase().replace(/^@/, '');
+  const { rows } = await client.query(
+    `SELECT c.id, c.qty, c.basket_item_id, b.slot
+       FROM live_claims c
+       JOIN live_basket_items b ON b.id = c.basket_item_id
+      WHERE c.session_id = $1
+        AND c.status IN ('HELD', 'CHECKOUT_SENT')
+        AND b.product_id IN (SELECT product_id FROM order_items
+                              WHERE order_id = $2 AND product_id IS NOT NULL)
+        AND ($3 = '' OR lower(replace(coalesce(c.buyer_handle, ''), '@', '')) = $3)
+      ORDER BY c.created_at
+      FOR UPDATE OF c`,
+    [sessionId, orderId, handle]);
+
+  const settled = [];
+  const done = new Set();
+  for (const claim of rows) {
+    // Without a handle to go on, only the first claim on each item is this
+    // buyer's; the ones behind it are other people still waiting.
+    if (!handle && done.has(claim.basket_item_id)) continue;
+    done.add(claim.basket_item_id);
+    await client.query(
+      `UPDATE live_claims SET status = 'PAID', order_id = $2 WHERE id = $1`,
+      [claim.id, orderId]);
+    await client.query(
+      `UPDATE live_basket_items SET reserved = GREATEST(0, reserved - $2) WHERE id = $1`,
+      [claim.basket_item_id, claim.qty]);
+    settled.push({ slot: claim.slot, qty: claim.qty });
+  }
+  return settled;
+}
+
 export function registerLive(app, ctx) {
   const {
     q, tx, wrap, HttpError, assertUuid, businessClause, scopeFor, requireOwner,
     assertInScope, logAction, settleAgent, deskFor, requireUser,
-    registerApprovalType, liveWebhookUrl, internalGate,
+    registerApprovalType, liveWebhookUrl, internalGate, callWebhook,
   } = ctx;
+
+  /**
+   * Nudge the live workflow. Best effort on purpose: the seller is already
+   * live on the platform, and refusing to connect because n8n did not answer
+   * would leave this app the only thing in the building that does not know.
+   * The orders arrive through the order sync regardless of this call.
+   */
+  const dispatchLive = (sessionId, action) =>
+    callWebhook(liveWebhookUrl(), { action, session_id: sessionId }, `live ${action}`);
 
   // ------------------------------------------------------------- readers
 
@@ -113,7 +266,19 @@ export function registerLive(app, ctx) {
               'revenue', COALESCE(max(m.revenue), 0))
        FROM live_metrics m WHERE m.session_id = s.id) AS totals,
     (SELECT count(*)::int FROM live_claims c
-      WHERE c.session_id = s.id AND c.status IN ('HELD', 'CHECKOUT_SENT')) AS open_claims`;
+      WHERE c.session_id = s.id AND c.status IN ('HELD', 'CHECKOUT_SENT')) AS open_claims,
+    -- What the room actually sold. Not the monitor's sample of it: these are
+    -- the orders themselves, so the figure survives the stream ending and
+    -- agrees with the Sales tab down to the peso.
+    (SELECT json_build_object(
+              'orders', count(*)::int,
+              'gross', COALESCE(sum(o.total), 0),
+              'paid', COALESCE(sum(o.total) FILTER (
+                        WHERE o.status NOT IN ('UNPAID','CANCELLED','RETURNED')), 0),
+              'unpaid', count(*) FILTER (WHERE o.status = 'UNPAID')::int,
+              'cancelled', count(*) FILTER (
+                        WHERE o.status IN ('CANCELLED','RETURNED'))::int)
+       FROM orders o WHERE o.live_session_id = s.id) AS sales`;
 
   async function readSessions(scope, { status, limit = 50 } = {}) {
     const where = businessClause(scope, { column: 's.business_id' });
@@ -165,6 +330,28 @@ export function registerLive(app, ctx) {
         WHERE c.session_id = $1
         ORDER BY c.created_at DESC LIMIT $2`,
       [sessionId, Math.min(Number(limit) || 100, 200)]);
+    return rows;
+  }
+
+  /** The orders this room took, newest first — the receipts behind `sales`. */
+  async function readLiveOrders(sessionId, limit = 50) {
+    const { rows } = await q(
+      `SELECT o.id, o.order_no, o.external_id, o.buyer_name, o.status, o.total,
+              o.currency, o.placed_at, o.checkout_url,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                         'sku', i.sku, 'name', i.name, 'qty', i.qty,
+                         'unit_price', i.unit_price,
+                         'slot', (SELECT b.slot FROM live_basket_items b
+                                   WHERE b.session_id = o.live_session_id
+                                     AND b.product_id = i.product_id)))
+                  FROM order_items i WHERE i.order_id = o.id
+              ), '[]') AS items
+         FROM orders o
+        WHERE o.live_session_id = $1
+        ORDER BY o.placed_at DESC
+        LIMIT $2`,
+      [sessionId, Math.min(Number(limit) || 50, 100)]);
     return rows;
   }
 
@@ -231,7 +418,12 @@ export function registerLive(app, ctx) {
       `SELECT sampled_at, viewers, likes, comments, basket_opens, orders, revenue
          FROM live_metrics WHERE session_id = $1
         ORDER BY sampled_at DESC LIMIT 120`, [session.id]);
-    res.json({ session, claims: await readClaims(session.id), series: series.reverse() });
+    res.json({
+      session,
+      claims: await readClaims(session.id),
+      orders: await readLiveOrders(session.id),
+      series: series.reverse(),
+    });
   }));
 
   // Booking a stream is an owner's call: it commits stock and a reply script.
@@ -468,6 +660,104 @@ export function registerLive(app, ctx) {
   }));
 
   /**
+   * The seller has gone live on the platform; connect this session to that
+   * stream. From here on an order placed in the room arrives through the
+   * ordinary order feed and is filed against this session — the basket counts
+   * down on its own, and whoever called "mine" has their hold closed by the
+   * sale rather than by somebody ticking it off.
+   *
+   * This does not start anything on the platform. It cannot: the seller
+   * starts their own stream in the platform's app. What it does is tell this
+   * app which room is theirs.
+   *
+   * Arming is still the gate — a session nobody approved does not go LIVE
+   * here any more than it does through the workflow.
+   */
+  app.post('/api/live/:id/go-live', wrap(async (req, res) => {
+    const session = await readSession(req.params.id);
+    if (!session) throw new HttpError(404, 'session not found');
+    assertInScope(req.user, session.business_id);
+    requireOwner(req.user, session.business_id);
+    if (session.status === 'ENDED') throw new HttpError(409, 'that stream is already over');
+    if (session.status === 'PAUSED') {
+      throw new HttpError(409, 'that session is paused — resume it before going live');
+    }
+
+    const { rows: approval } = await q(
+      `SELECT status FROM approvals WHERE id = $1`, [session.armed_approval_id ?? null]);
+    if (approval[0]?.status !== 'APPROVED') {
+      throw new HttpError(409, 'arm the session first — the desk needs an approved line to send');
+    }
+
+    const room = roomId(req.body?.external_id ?? req.body?.room_url ?? '');
+    if (!room && !session.external_id) {
+      // Without a room id the only thing left to match an order on is "the
+      // one stream this shop has open", which is true right up until it is
+      // not. Say so rather than silently filing somebody else's orders here.
+      if (!session.account_id) {
+        throw new HttpError(400,
+          'give the room id from the stream, or connect a shop to this session first');
+      }
+    }
+
+    await tx(async (client) => {
+      await client.query(
+        `UPDATE live_sessions
+            SET status = 'LIVE',
+                external_id = COALESCE($2, external_id),
+                started_at = COALESCE(started_at, now())
+          WHERE id = $1 AND status <> 'PAUSED'`,
+        [session.id, room || null]);
+      await logAction(client, {
+        businessId: session.business_id,
+        action: 'LIVE_CONNECTED',
+        actor: req.user.email,
+        actorUserId: req.user.id,
+        detail: { platform: session.platform, external_id: room || session.external_id },
+      });
+    });
+
+    // Tell the workflow to start watching the room. It polls the comments and
+    // the metrics; the orders come through the order sync like any other.
+    await dispatchLive(session.id, 'watch');
+
+    const fresh = await readSession(session.id);
+    res.json({
+      ok: true,
+      session: fresh,
+      // Said plainly, because it decides whether orders can be matched
+      // exactly or only by "this shop has one stream open".
+      matching: fresh.external_id ? 'room' : 'single-open-session',
+      note: fresh.external_id
+        ? 'Orders carrying this room id will be filed against this session.'
+        : 'No room id yet, so orders are matched while this is the only open '
+          + 'stream on this shop. Add the room id to make it exact.',
+    });
+  }));
+
+  /**
+   * Whatever the seller pasted, reduced to the id. They may give the number
+   * straight out of the platform's own studio, or the URL of the stream —
+   * Facebook puts the video id in the path, TikTok does not, so a URL that
+   * carries no id comes back empty rather than wrong.
+   */
+  function roomId(input) {
+    const text = String(input ?? '').trim();
+    if (!text) return '';
+    if (!/^https?:\/\//i.test(text)) return text.slice(0, 200);
+    try {
+      const url = new URL(text);
+      const fromQuery = url.searchParams.get('v') ?? url.searchParams.get('video_id')
+        ?? url.searchParams.get('room_id');
+      if (fromQuery) return fromQuery.slice(0, 200);
+      const digits = url.pathname.split('/').filter((part) => /^\d{6,}$/.test(part));
+      return digits.at(-1) ?? '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
    * Stop the session answering anybody, now. The live equivalent of the kill
    * switch: holds stay held so nobody loses their place, but no further claim
    * is taken and no further line goes out until it is armed again.
@@ -581,6 +871,7 @@ export function registerLive(app, ctx) {
       // The workflow is told in one word whether it may answer anybody.
       armed: session.status === 'LIVE' && approval[0]?.status === 'APPROVED',
       claims: await readClaims(session.id, 50),
+      orders: await readLiveOrders(session.id, 50),
     });
   }));
 
@@ -879,5 +1170,5 @@ export function registerLive(app, ctx) {
     res.json({ ok: true, expired: out });
   }));
 
-  return { readSession, readSessions, readClaims };
+  return { readSession, readSessions, readClaims, readLiveOrders };
 }

@@ -4,7 +4,7 @@
 // its owner picks — so the same item can sit on two Shopee shops and a Lazada
 // account, each with its own listing id and its own state. Listing it is
 // outbound work, so it waits for approval like everything else.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, Unauthorized } from './../api.js';
 
 const PLATFORM_LABEL = {
@@ -27,13 +27,27 @@ const STATE_SUFFIX = {
   NOT_LISTED: ' · not listed',
 };
 
+/**
+ * Only a picture this deployment serves is shown here. A product row can
+ * carry any url — it is tenant data, and an older catalogue is full of links
+ * to shops that no longer exist — and rendering those would both leave broken
+ * boxes in the queue and have every reviewer's browser fetch whatever address
+ * someone put in the row. Uploaded photos live under /uploads, so that is
+ * what gets drawn.
+ */
+const ours = (url) => typeof url === 'string' && url.startsWith('/uploads/');
+
 const money = (value, currency) =>
   `${currency} ${Number(value).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
 
 const BLANK = {
   sku: '', name: '', description: '', price: '', stock: '0',
-  weight_kg: '0.5', images: '', category_shopee: '', category_lazada: '', category_tiktok: '',
+  weight_kg: '0.5', images: [], category_shopee: '', category_lazada: '', category_tiktok: '',
 };
+
+// What a phone's picker will hand back, and what the backend will keep.
+const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif';
+const MAX_PHOTO = 8 * 1024 * 1024;
 
 export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
   const [data, setData] = useState(null);
@@ -46,8 +60,10 @@ export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
   const [choosing, setChoosing] = useState(null);     // product id
   const [chosen, setChosen] = useState([]);           // account ids
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const [note, setNote] = useState(null);
+  const photoInput = useRef(null);
 
   const load = useCallback(async () => {
     try {
@@ -63,6 +79,37 @@ export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
 
   const accounts = data?.accounts ?? [];
   const sellable = accounts.filter((a) => ['shopee', 'lazada', 'tiktok'].includes(a.platform));
+
+  /**
+   * Photos the seller picked in their gallery (or took just now). They go up
+   * as they are chosen rather than with the form, because a marketplace needs
+   * a URL it can fetch, so the picture has to exist somewhere before the
+   * listing can name it — and because a thumbnail appearing is how you know
+   * you picked the right photo.
+   */
+  const addPhotos = async (fileList) => {
+    const files = [...(fileList ?? [])];
+    if (!files.length) return;
+    setUploading(true);
+    setError(null);
+    try {
+      const added = [];
+      for (const file of files) {
+        if (file.size > MAX_PHOTO) {
+          throw new Error(`${file.name} is over 8MB — pick a smaller photo`);
+        }
+        const stored = await api.uploadImage(businessId, file);
+        added.push(stored.url);
+      }
+      setForm((f) => ({ ...f, images: [...f.images, ...added] }));
+    } catch (err) {
+      if (err instanceof Unauthorized) return onSignedOut();
+      setError(err.message);
+    } finally {
+      setUploading(false);
+      if (photoInput.current) photoInput.current.value = '';  // same file again
+    }
+  };
 
   const create = async (e) => {
     e.preventDefault();
@@ -84,7 +131,7 @@ export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
         price: Number(form.price),
         stock: Number(form.stock),
         weight_kg: Number(form.weight_kg),
-        images: form.images.split(/[\s,]+/).filter(Boolean),
+        images: form.images,
         platform_meta: platformMeta,
       });
       setForm(BLANK);
@@ -220,7 +267,17 @@ export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
           {products.map((product) => (
             <li key={product.id} className="p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
+                <div className="flex min-w-0 gap-3">
+                  {/* The first photo, because the first photo is the one every
+                      marketplace uses as the listing's cover. */}
+                  {ours(product.images?.[0]) && (
+                    <img
+                      src={product.images[0]}
+                      alt=""
+                      className="h-12 w-12 shrink-0 rounded-lg border border-slate-800 object-cover"
+                    />
+                  )}
+                  <div className="min-w-0">
                   <h3 className="truncate text-sm text-slate-100">{product.name}</h3>
                   <p className="font-mono text-[11px] text-slate-500">
                     {product.sku} · {money(product.price, product.currency)} ·{' '}
@@ -241,6 +298,7 @@ export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
                         {listing.label}{STATE_SUFFIX[listing.state] ?? ''}
                       </span>
                     ))}
+                  </div>
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-1.5">
@@ -463,13 +521,55 @@ export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-sky-500" />
               </label>
             </div>
-            <label className="block text-sm">
-              <span className="text-slate-400">Image urls</span>
-              <input id="pr-images" value={form.images}
-                onChange={(e) => setForm({ ...form, images: e.target.value })}
-                placeholder="https://… https://…"
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 outline-none focus:border-sky-500" />
-            </label>
+            {/* Photos off the device. `accept` on a phone is what makes the
+                gallery and the camera the choices, rather than a file tree. */}
+            <div className="text-sm">
+              <span className="text-slate-400">Photos</span>
+              <input
+                ref={photoInput}
+                id="pr-photo-input"
+                type="file"
+                accept={ACCEPT}
+                multiple
+                className="hidden"
+                onChange={(e) => addPhotos(e.target.files)}
+              />
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                {form.images.map((url) => (
+                  <div key={url} className="relative">
+                    <img
+                      src={url}
+                      alt=""
+                      className="h-16 w-16 rounded-lg border border-slate-700 object-cover"
+                    />
+                    <button
+                      type="button"
+                      aria-label="Remove photo"
+                      onClick={() => setForm({
+                        ...form, images: form.images.filter((u) => u !== url),
+                      })}
+                      className="absolute -right-1.5 -top-1.5 h-5 w-5 rounded-full border border-slate-700 bg-slate-900 text-xs leading-none text-slate-300 hover:bg-red-900 hover:text-white"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  id="pr-photo"
+                  disabled={uploading}
+                  onClick={() => photoInput.current?.click()}
+                  className="flex h-16 w-16 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-slate-600 text-slate-400 hover:border-sky-500 hover:text-sky-300 disabled:opacity-50"
+                >
+                  <span className="text-lg leading-none">{uploading ? '…' : '+'}</span>
+                  <span className="text-[10px]">{uploading ? 'sending' : 'Add photo'}</span>
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-slate-500">
+                From your gallery or camera. TikTok Shop will not take a listing
+                without one.
+              </p>
+            </div>
             {/* Every marketplace insists on its own category id before it will
                 take a listing, so they are asked for here rather than failing
                 halfway out. */}

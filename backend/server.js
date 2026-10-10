@@ -26,6 +26,7 @@ import {
   authorizable, authorizeUrl, exchangeCode, newState, redirectUri, PLATFORM_NAME,
 } from './oauth.js';
 import { registerCommerce } from './commerce.js';
+import { registerUploads } from './uploads.js';
 import { registerLive } from './live.js';
 import {
   COOKIE_NAME, readCookie, resolveSession, requireUser, scopeFor,
@@ -2700,7 +2701,7 @@ app.post('/api/internal/agents/:id/release', wrap(async (req, res) => {
 const moduleContext = {
   q, tx, wrap, HttpError, assertUuid, businessClause, scopeFor, requireOwner,
   assertInScope, logAction, settleAgent, deskFor, requireUser,
-  registerApprovalType, internalGate,
+  registerApprovalType, internalGate, callWebhook,
   chatWebhookUrl: () => N8N_CHAT_WEBHOOK_URL || N8N_DISPATCH_WEBHOOK_URL,
   orderSyncWebhookUrl: () => N8N_PRODUCT_SYNC_WEBHOOK_URL,
   liveWebhookUrl: () => N8N_LIVE_WEBHOOK_URL || N8N_DISPATCH_WEBHOOK_URL,
@@ -2708,6 +2709,7 @@ const moduleContext = {
 
 registerCommerce(app, moduleContext);
 registerLive(app, moduleContext);
+registerUploads(app, moduleContext);
 
 // -------------------------------------------------------------- errors
 

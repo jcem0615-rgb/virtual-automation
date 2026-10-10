@@ -16,6 +16,7 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `backend/secrets.js` | AES-256-GCM for marketplace credentials. Never serves a value. |
 | `backend/oauth.js` | Connecting a shop by authorising on the marketplace. |
 | `backend/commerce.js` | The inbox, orders, payments and payouts. |
+| `backend/uploads.js` | Product photos off the device, and the folder they are served from. |
 | `backend/live.js` | Live selling: the basket, the monitor, the claims. |
 | `backend/business-lines.js` | The trades a floor can be opened for. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`. There is no sign-up page. |
@@ -190,6 +191,15 @@ the realtime path depends on triggers.
   what total, when stock really leaves the shelf (`release_stock_on`), and when an unpaid
   order is chased or given up on are per business and per marketplace. An unpaid order
   ships only on COD, inside the limit, and the refusal quotes the rule.
+- **A photo has to become a URL before a listing can carry it.** Shopee, Lazada and
+  TikTok Shop fetch the image over HTTP while they build the listing — none of them will
+  look at a picture on the seller's phone. So `POST /api/uploads` takes the `File` as the
+  whole request body (no multipart, no parser, no dependency), decides what it is from its
+  own first bytes rather than the `Content-Type` header, and writes it under
+  `uploads/<business_id>/<random>.<ext>`. Writing one needs an owner's session on that
+  business; reading one needs nothing, because a marketplace holds no session here — the
+  random name is the only thing guarding it. `UPLOAD_DIR` is a volume, or a rebuild drops
+  the pictures the live listings point at.
 - **A live session is armed once, and that is the gate.** A room moves faster than anyone
   can click, so `live_arm` is an approval over the exact sentence the desk will send a
   claimer; inside that session the desk fills in only the blanks. Pinning the basket is its
@@ -197,6 +207,17 @@ the realtime path depends on triggers.
   a session that is not `LIVE` with an `APPROVED` arming — the same shape as a paused agent.
   TikTok's basket is real; Meta retired Live Shopping in October 2022, so a facebook
   session says so on its face and reads the comments instead.
+- **An order out of a live room belongs to that room.** `POST /api/live/:id/go-live`
+  connects a session to the stream the seller just started — it starts nothing on the
+  platform, it says which room is theirs — and arming is still the gate it goes through.
+  From then on the order sync files matching orders against the session
+  (`orders.live_session_id`) and `attachOrderToLive()` moves the basket: the order's own
+  lines are what `sold` counts, and a matching claim only has its hold released, or one
+  sale would read as two. `live_counted_at` makes that happen once however often the order
+  re-syncs, and a cancellation takes it back out. TikTok Shop does not hand back the room
+  an order was bought in, so the workflow uses what is actually knowable — this shop is
+  streaming and the order was placed after it started — and two rooms open on one shop is
+  not guessed at.
 - **Parameterised SQL only.** Validate ids with `assertUuid()`.
 - **Every state transition writes `action_logs`,** naming the person (`actor` is the
   user's email, `actor_user_id` the row) or `n8n` for an automated one.
@@ -239,7 +260,13 @@ the realtime path depends on triggers.
   (`email`, `meta_dm`, `shopee`) drives routing in the dispatch workflow.
 - Each figure carries a two-line plate: name, then `role_title`. The plates have a
   background on purpose — two people standing close used to produce unreadable overlapping
-  text. `separate()` keeps stopped figures 92px apart, which is what two lines need.
+  text. `separate()` keeps a plate-shaped box (`PLATE_W` × `PLATE_H`) clear between any two
+  people, walking or not, because a plate printed over another plate is unreadable for as
+  long as the pass takes. The nudge that does it is capped at `NUDGE_SPEED`, under walking
+  pace, and that cap is the point: an uncapped push moved people further in one frame than
+  a step did, so two people meeting at the same aisle corner shoved each other back and
+  forth for ever and the floor looked frozen. Each person also carries a fixed `laneX` /
+  `laneY` so no two route through the identical waypoint in the first place.
 - Phaser owns the canvas; React never re-renders it. Push data in through
   `scene.syncAgents(agents)`. To add a visual state, extend `applyStatus()` — that is
   also where a status decides what the figure *does* (sit at the desk, stand beside it,
@@ -283,6 +310,13 @@ the realtime path depends on triggers.
   the right target there and is not wired; on Facebook, with Live Shopping gone, the seller
   has to have a checkout of their own.
 - `connect_states` rows are swept only by their expiry index, not by a job.
+- An uploaded photo is written before the product is saved, so abandoning the form leaves
+  the file behind. Nothing sweeps `uploads/`, and deleting a product does not delete its
+  pictures — a listing already on a marketplace may still be pointing at them.
+- A live order is matched to its session by the room id when the platform gives one, and
+  otherwise by "this shop has exactly one stream open". TikTok Shop's order API does not
+  carry the room, so on TikTok it is always the second. Two streams on one shop at once
+  and neither is attributed.
 - `workflow_approval_dispatch.json` routes by channel into placeholder nodes; the real
   Meta / Shopee / email senders are not wired.
 - Reject always replays through `N8N_RETRY_WEBHOOK_URL` (the sales webhook). Once other

@@ -97,6 +97,15 @@ export const api = {
     else if (platform && platform !== 'all') params.set('platform', platform);
     return request(`/api/products?${params}`);
   },
+  // A photo straight off the phone. The File is the whole body — no form
+  // envelope — and the content-type header has to be the picture's own, not
+  // JSON, so this one call goes round `request`.
+  uploadImage: (businessId, file) =>
+    request(`/api/uploads?business_id=${businessId}`, {
+      method: 'POST',
+      headers: { 'content-type': file.type || 'application/octet-stream' },
+      body: file,
+    }),
   createProduct: (body) =>
     request('/api/products', { method: 'POST', body: JSON.stringify(body) }),
   editProduct: (id, body) =>
@@ -157,6 +166,12 @@ export const api = {
   bookLive: (body) => request('/api/live', { method: 'POST', body: JSON.stringify(body) }),
   fillBasket: (id, items) =>
     request(`/api/live/${id}/basket`, { method: 'POST', body: JSON.stringify({ items }) }),
+  // The seller is live on the platform; tell the app which room is theirs so
+  // the orders viewers place in it come back here by themselves.
+  goLive: (id, room) =>
+    request(`/api/live/${id}/go-live`, {
+      method: 'POST', body: JSON.stringify({ external_id: room }),
+    }),
   armLive: (id, replyTemplate) =>
     request(`/api/live/${id}/arm`, {
       method: 'POST',

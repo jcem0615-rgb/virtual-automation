@@ -21,6 +21,8 @@
 // like everything else. An order status move and a reconciliation do not
 // reach anybody, so they are ordinary guarded writes — owner-only, logged.
 
+import { attachOrderToLive } from './live.js';
+
 export const CHANNELS = [
   'shopee_chat', 'lazada_chat', 'tiktok_dm', 'meta_dm', 'instagram_dm', 'email',
 ];
@@ -861,6 +863,24 @@ export function registerCommerce(app, ctx) {
          pay.paid_at ?? null, pay.escrow_release_at ?? null],
       );
 
+      // If this came out of a live room, it belongs to that room: the
+      // session takes the sale, the basket slot moves, and whoever called
+      // "mine" for it has their hold turned into a receipt. A shopfront
+      // order matches nothing here and passes straight through.
+      const live = await attachOrderToLive(client, {
+        businessId,
+        accountId,
+        orderId: order.id,
+        status,
+        source,
+        buyerHandle: body.buyer_handle ?? null,
+        hint: {
+          session_id: body.live_session_id
+            ? assertUuid(body.live_session_id, 'live_session_id') : null,
+          room_id: body.live_room_id ?? body.room_id ?? null,
+        },
+      });
+
       // Which event takes the stock is the rule's call, not this route's.
       const event = ['CANCELLED', 'RETURNED'].includes(status) ? 'cancel'
         : state === 'RELEASED' ? 'released'
@@ -874,11 +894,12 @@ export function registerCommerce(app, ctx) {
         actor: 'n8n',
         detail: {
           order_no: body.order_no ?? externalId, account: account.label,
-          status, method, source, ...stock,
+          status, method, source: live ? 'live' : source, ...stock,
+          ...(live ? { live_session_id: live.session_id, slots: live.slots ?? [] } : {}),
           ...(codRefused ? { cod_limit: rule.cod_limit, total } : {}),
         },
       });
-      return { order_id: order.id, ...stock };
+      return { order_id: order.id, ...stock, live };
     });
 
     res.status(201).json({

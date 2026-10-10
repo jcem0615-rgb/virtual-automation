@@ -81,7 +81,12 @@ services:
       # Secure here. docker-compose.prod.yml turns it back on.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       SESSION_DAYS: ${SESSION_DAYS:-7}
+      # Product photos land here. It is a volume, not the image, or every
+      # rebuild would drop the pictures the live listings point at.
+      UPLOAD_DIR: /data/uploads
       TZ: Asia/Manila
+    volumes:
+      - uploads:/data/uploads
     ports:
       - "127.0.0.1:4000:4000"
     depends_on:
@@ -99,3 +104,4 @@ volumes:
   pgdata:
   ollama:
   n8ndata:
+  uploads:

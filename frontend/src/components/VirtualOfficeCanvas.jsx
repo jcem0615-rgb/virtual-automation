@@ -149,6 +149,14 @@ const STATUS_STYLE = {
 
 const WALK_SPEED = 54;          // px per second
 const ARRIVE_RADIUS = 3;
+const WAYPOINT_RADIUS = 9;      // mid-route corners: near enough is arrived
+// A two-line nameplate is about this big. Two figures closer than this have
+// plates that sit on top of each other, so this is the room separate() keeps.
+const PLATE_W = 96;
+const PLATE_H = 44;
+// A shove is a nudge, never a shunt: capped below walking pace so being
+// jostled can never cancel out the step somebody is taking.
+const NUDGE_SPEED = 46;         // px per second
 
 // The gaps between desk blocks. Anyone crossing the room walks an aisle
 // instead of straight over someone's desk.
@@ -784,6 +792,11 @@ class OfficeScene extends Phaser.Scene {
       task: null,          // 'SIT' | 'STAND' | 'WANDER' | 'STOPPED'
       resting: false,      // sitting somewhere that is not their desk
       phase: rand(0, 10),  // keeps the crowd out of lockstep
+      // Their own lane. Everybody routes through the same few aisle corners,
+      // and two people aiming at one identical point stand on each other and
+      // shove instead of walking, so each keeps a fixed offset of their own.
+      laneY: rand(-17, 17),
+      laneX: rand(-17, 17),
       stride: 0,
       facing: 1,
       restUntil: 0,
@@ -848,8 +861,8 @@ class OfficeScene extends Phaser.Scene {
     const from = person.pos;
     person.path = [];
     if (Math.hypot(destination.x - from.x, destination.y - from.y) > 150) {
-      const aisleY = nearest(AISLE_ROWS, (from.y + destination.y) / 2);
-      const aisleX = nearest(AISLE_COLS, (from.x + destination.x) / 2);
+      const aisleY = nearest(AISLE_ROWS, (from.y + destination.y) / 2) + person.laneY;
+      const aisleX = nearest(AISLE_COLS, (from.x + destination.x) / 2) + person.laneX;
       person.path.push({ x: from.x, y: aisleY });
       if (Math.abs(destination.x - from.x) > 200) {
         person.path.push({ x: aisleX, y: aisleY });
@@ -878,7 +891,12 @@ class OfficeScene extends Phaser.Scene {
       };
     }
 
-    const free = this.spots.filter((s) => !s.takenBy);
+    // A sofa seats three, but three names side by side are three names you
+    // cannot read, so a spot within a plate's width of a taken one is not
+    // offered. The cushion stays; nobody sits shoulder to shoulder on it.
+    const taken = this.spots.filter((s) => s.takenBy);
+    const free = this.spots.filter((s) => !s.takenBy && !taken.some(
+      (t) => Math.abs(t.x - s.x) < PLATE_W && Math.abs(t.y - s.y) < PLATE_H));
     if (!free.length) return { ...person.seat };
 
     const spot = free[Math.floor(rand(0, free.length))];
@@ -890,7 +908,7 @@ class OfficeScene extends Phaser.Scene {
   update(time, delta) {
     const dt = Math.min(delta, 50) / 1000;
     for (const person of this.people.values()) this.step(person, time, dt);
-    this.separate();
+    this.separate(time, dt);
   }
 
   step(person, time, dt) {
@@ -910,13 +928,13 @@ class OfficeScene extends Phaser.Scene {
       const dx = person.target.x - person.pos.x;
       const dy = person.target.y - person.pos.y;
       const distance = Math.hypot(dx, dy);
-      if (distance <= ARRIVE_RADIUS) {
+      if (distance <= (person.path.length ? WAYPOINT_RADIUS : ARRIVE_RADIUS)) {
         person.pos = { ...person.target };
         person.target = null;
         if (person.task === 'WANDER' && !person.path.length) {
           // Sit down if the spot they claimed is a seat; breaks last longer.
           person.resting = person.claim?.sit === true;
-          person.restUntil = time + (person.resting ? rand(6000, 12000) : rand(2600, 7000));
+          person.restUntil = time + (person.resting ? rand(5000, 10000) : rand(1500, 4200));
         }
       } else {
         const stepLength = Math.min(WALK_SPEED * dt, distance);
@@ -1003,30 +1021,70 @@ class OfficeScene extends Phaser.Scene {
   }
 
   /**
-   * Nobody walks through anyone else. Anybody on their feet gets nudged —
-   * wider apart when they have stopped, so names stay readable, and just
-   * enough while walking that two people brush past instead of merging.
-   * Seated figures are left alone: they belong where they are.
+   * Nobody stands on anyone else. The room kept between two people is the
+   * size of a nameplate — wider than it is tall, because a two-line plate is
+   * what has to stay readable — and it is kept whether they are moving or
+   * not, since a plate printed over another plate is unreadable for as long
+   * as the pass takes.
+   *
+   * The nudge is capped under walking pace, which is the whole point. A shove
+   * that beats a step turns two people meeting at the same aisle corner into
+   * a scrum: each gets pushed off, each walks straight back, and neither ever
+   * arrives — the floor looks frozen. Capped, they ease round each other and
+   * carry on. Somebody parked — at their own desk, or sat down on a break —
+   * is where they belong, so two of those are left alone.
    */
-  separate() {
-    const onFoot = [...this.people.values()].filter(
-      (p) => p.task !== 'STOPPED' && !p.resting && !(p.task === 'SIT' && !p.target));
-    for (let i = 0; i < onFoot.length; i += 1) {
-      for (let j = i + 1; j < onFoot.length; j += 1) {
-        const a = onFoot[i];
-        const b = onFoot[j];
-        const bothStopped = !a.target && !b.target;
-        const room = bothStopped ? 92 : 38;
-        const dx = b.pos.x - a.pos.x;
-        const dy = b.pos.y - a.pos.y;
-        const distance = Math.hypot(dx, dy);
-        if (distance > room || distance === 0) continue;
-        const push = (room - distance) / 2;
-        const nx = dx / distance;
-        const ny = dy / distance;
-        a.pos.x -= nx * push; a.pos.y -= ny * push;
-        b.pos.x += nx * push; b.pos.y += ny * push;
+  separate(time, dt) {
+    const crowd = [...this.people.values()].filter((p) => p.task !== 'STOPPED');
+    const cap = NUDGE_SPEED * dt;
+    for (let i = 0; i < crowd.length; i += 1) {
+      for (let j = i + 1; j < crowd.length; j += 1) {
+        const a = crowd[i];
+        const b = crowd[j];
+        const parkedA = isParked(a);
+        const parkedB = isParked(b);
+        if (parkedA && parkedB) continue;
+
+        // Measure in units of the plate, so the space kept is plate-shaped
+        // rather than a circle the width of the widest side. It is kept
+        // whether they are walking or not: two people passing at half a
+        // plate's width have their names printed over each other for as long
+        // as it takes, which is exactly what made the floor unreadable.
+        const roomX = PLATE_W;
+        const roomY = PLATE_H;
+        let nx = (b.pos.x - a.pos.x) / roomX;
+        let ny = (b.pos.y - a.pos.y) / roomY;
+        let gap = Math.hypot(nx, ny);
+        if (gap >= 1) continue;
+        if (gap === 0) {                       // exactly on top: pick a side
+          nx = (i % 2 ? 1 : -1) * 0.01;
+          ny = 0.01;
+          gap = Math.hypot(nx, ny);
+        }
+        const share = (1 - gap) / gap;
+        let px = nx * share * roomX;
+        let py = ny * share * roomY;
+        // Cap what one frame may move them, then split it between the two —
+        // or give the lot to whichever one is actually on their feet.
+        const length = Math.hypot(px, py);
+        if (length > cap) {
+          px = (px / length) * cap;
+          py = (py / length) * cap;
+        }
+        if (!parkedA) this.shove(a, -px, -py, parkedB ? 1 : 0.5, time);
+        if (!parkedB) this.shove(b, px, py, parkedA ? 1 : 0.5, time);
       }
+    }
+  }
+
+  /** Move somebody aside, inside the room, and get them walking again. */
+  shove(person, dx, dy, weight, time) {
+    person.pos.x = Phaser.Math.Clamp(person.pos.x + dx * weight, 44, WIDTH - 44);
+    person.pos.y = Phaser.Math.Clamp(person.pos.y + dy * weight, WALL_H + 34, HEIGHT - 44);
+    // Being jostled while you are stood about is a reason to move on, not to
+    // stand there being jostled.
+    if (person.task === 'WANDER' && !person.target && !person.resting) {
+      person.restUntil = Math.min(person.restUntil, time + 500);
     }
   }
 
@@ -1044,6 +1102,11 @@ class OfficeScene extends Phaser.Scene {
     parts.marker.setScale(1);
     parts.marker.y = -36;
   }
+}
+
+/** Parked: sat at their own desk, or sat down somewhere on a break. */
+function isParked(person) {
+  return person.resting || (person.task === 'SIT' && !person.target);
 }
 
 function hash(value) {

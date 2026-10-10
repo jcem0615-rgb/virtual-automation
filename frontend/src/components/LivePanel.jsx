@@ -44,6 +44,8 @@ export default function LivePanel({ businessId, isOwner, refreshKey, onSignedOut
   const [booking, setBooking] = useState(false);
   const [form, setForm] = useState({ platform: 'tiktok', title: '', hold_minutes: '15' });
   const [filling, setFilling] = useState(null);     // session id
+  const [connecting, setConnecting] = useState(null); // session id
+  const [room, setRoom] = useState('');             // the stream's id or link
   const [picked, setPicked] = useState([]);         // { product_id, slot, live_price, allocation }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -249,6 +251,25 @@ export default function LivePanel({ businessId, isOwner, refreshKey, onSignedOut
                           Basket
                         </button>
                       )}
+                      {/* Going live on the platform happens in the platform's
+                          own app. This is where you tell this one which room
+                          is yours, and from then on the orders find their way
+                          back by themselves. */}
+                      {session.armed_approval_id
+                        && ['ARMED', 'SCHEDULED', 'LIVE'].includes(session.status)
+                        && connecting !== session.id && (
+                        <button
+                          disabled={busy}
+                          onClick={() => {
+                            setConnecting(session.id);
+                            setRoom(session.external_id ?? '');
+                            setNote(null);
+                          }}
+                          className="rounded-lg border border-sky-800 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-950/60 disabled:opacity-50"
+                        >
+                          {session.status === 'LIVE' ? 'Stream link' : "I'm live"}
+                        </button>
+                      )}
                       {pinned.length > 0 && ['SCHEDULED'].includes(session.status) && (
                         <button
                           disabled={busy}
@@ -289,6 +310,75 @@ export default function LivePanel({ businessId, isOwner, refreshKey, onSignedOut
                     </div>
                   )}
                 </div>
+
+                {/* Connecting the stream. The room id is what lets an order
+                    be filed against this session exactly; without one, an
+                    order can only be matched while this shop has a single
+                    stream open, and the panel says so rather than pretending. */}
+                {connecting === session.id && (
+                  <div className="mt-3 rounded-lg border border-sky-900 bg-slate-950 p-3">
+                    <p className="text-xs text-slate-400">
+                      Start the stream in {session.platform === 'tiktok' ? 'TikTok' : 'Facebook'},
+                      then paste its link or room id here. Everything viewers buy in
+                      the room lands in Sales by itself, and the basket counts down
+                      as it goes.
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <input
+                        id="live-room"
+                        value={room}
+                        onChange={(e) => setRoom(e.target.value)}
+                        placeholder="Stream link, or the room id"
+                        className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100 outline-none focus:border-sky-500"
+                      />
+                      <button
+                        disabled={busy}
+                        onClick={() => run(async () => {
+                          const out = await api.goLive(session.id, room.trim());
+                          setConnecting(null);
+                          return out;
+                        }, 'Connected. Orders from this room will land here.')}
+                        className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                      >
+                        Connect
+                      </button>
+                      <button
+                        onClick={() => { setConnecting(null); setNote(null); }}
+                        className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {session.external_id && (
+                      <p className="mt-2 font-mono text-[11px] text-emerald-400">
+                        connected to room {session.external_id}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* What the room actually took. These are the orders
+                    themselves, not the monitor's sample of them, so the figure
+                    agrees with the Sales tab and survives the stream ending. */}
+                {Number(session.sales?.orders ?? 0) > 0 && (
+                  <div className="mt-3 rounded-lg border border-emerald-900/60 bg-emerald-950/30 px-3 py-2">
+                    <p className="text-xs text-emerald-300">
+                      <span className="font-mono text-sm">{session.sales.orders}</span>
+                      {' '}order{session.sales.orders === 1 ? '' : 's'} from this stream ·{' '}
+                      <span className="font-mono">{money(session.sales.gross)}</span>
+                      {Number(session.sales.unpaid) > 0 && (
+                        <span className="text-amber-400">
+                          {' '}· {session.sales.unpaid} still unpaid
+                        </span>
+                      )}
+                      {Number(session.sales.cancelled) > 0 && (
+                        <span className="text-slate-500">
+                          {' '}· {session.sales.cancelled} cancelled
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                )}
 
                 {/* The monitor. Drawn from live_metrics, so it survives the tab
                     being closed and matches what anyone else is looking at. */}
