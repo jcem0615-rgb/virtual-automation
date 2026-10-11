@@ -50,9 +50,26 @@ and signs that account out everywhere.
 Every port is bound to `127.0.0.1` in this file — it is the development setup.
 See **Deploying it online** below for the version that faces the internet.
 
-Import both files in `workflows/` through the n8n UI, then activate them. They
-read `BACKEND_URL`, `OLLAMA_URL`, `OLLAMA_MODEL` and `INTERNAL_TOKEN` from the
-environment that `docker-compose.yml` already sets.
+**Nothing is automated until the workflows are in n8n.** A fresh stack starts
+with an empty n8n: the dashboard works, the approval gate works, and no draft
+is ever written, because every agent's work comes from a workflow. The
+directory is mounted into the container, so all of them go in at once:
+
+```bash
+docker compose exec n8n n8n import:workflow --separate --input=/workflows
+docker compose restart n8n
+```
+
+Then open http://127.0.0.1:5678 and **activate** each one — an imported
+workflow is inactive, and an inactive workflow's webhook returns 404. There
+are eight; `workflow_sales_lead.json` and `workflow_marketplace_chat.json`
+are the two that make the floor do anything on day one.
+
+They read `BACKEND_URL`, `OLLAMA_URL`, `OLLAMA_MODEL` and `INTERNAL_TOKEN`
+from the environment `docker-compose.yml` already sets. The marketplace and
+Meta credentials are per connected account and come from the backend at run
+time; the `$env` ones in `docker-compose.yml` are for the two workflows that
+have not been moved over yet (see **Known gaps**).
 
 ## Deploying it online
 

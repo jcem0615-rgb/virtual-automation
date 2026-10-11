@@ -325,7 +325,11 @@ the realtime path depends on triggers.
   `/finance/transaction/detail/get` per order.
 - A live checkout link is whatever `LIVE_CHECKOUT_BASE` points at. TikTok's own cart is
   the right target there and is not wired; on Facebook, with Live Shopping gone, the seller
-  has to have a checkout of their own.
+  has to have a checkout of their own. `LIVE_REPLY_WEBHOOK_URL` is the other half: there is
+  no open API that writes a comment into a live room, so getting the desk's approved line
+  in front of the room is still the seller's own plumbing. With either unset the claim is
+  recorded `HELD` with `LIVE_CLAIM_NOT_ANSWERED` naming the variable — it must never read
+  as a checkout that was sent.
 - `connect_states` rows are swept only by their expiry index, not by a job.
 - An uploaded photo is written before the product is saved, so abandoning the form leaves
   the file behind. Nothing sweeps `uploads/`, and deleting a product does not delete its
@@ -334,8 +338,23 @@ the realtime path depends on triggers.
   otherwise by "this shop has exactly one stream open". TikTok Shop's order API does not
   carry the room, so on TikTok it is always the second. Two streams on one shop at once
   and neither is attributed.
-- `workflow_approval_dispatch.json` routes by channel into placeholder nodes; the real
-  Meta / Shopee / email senders are not wired.
+- `workflow_approval_dispatch.json` has real Meta and Shopee senders; the email branch is
+  still a placeholder node, and a channel it does not route falls through to a no-op. An
+  inbox reply does not come here at all — it goes to `N8N_CHAT_WEBHOOK_URL`.
+- **`workflow_post_sync.json` and `workflow_approval_dispatch.json` still read marketplace
+  credentials from `$env`,** where `workflow_marketplace_chat.json` and
+  `workflow_product_sync.json` read them per connected account from
+  `/api/internal/accounts/:id/credentials`. So a post or a dispatched reply goes out on
+  whichever single account the environment names, not the shop the business connected —
+  wrong the moment a second business or a second shop exists. The chat path is fixable the
+  same way products were; posts need `social_post_targets` to carry an account first,
+  because it is per platform today and a business can hold two shops on one marketplace.
+- Nothing imports the workflows into n8n. `docker-compose.yml` mounts `./workflows` at
+  `/workflows` and the README gives the one-line import, but a fresh stack has an empty
+  n8n until somebody runs it — and an imported workflow still has to be activated by hand.
+- `neverError: true` is set on most workflow HTTP nodes so one failing call does not abort
+  a run. Where a downstream node reads the result that is right; where it does not, a
+  failed call is invisible. Worth a pass before trusting a deployment.
 - Reject always replays through `N8N_RETRY_WEBHOOK_URL` (the sales webhook). Once other
   departments have workflows, route retries per department.
 - External LLM fallback (when Ollama is down) is not implemented.

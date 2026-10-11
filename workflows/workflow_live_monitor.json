@@ -1,5 +1,5 @@
 {
-  "name": "Live Selling → Basket, Monitor & Checkout",
+  "name": "Live Selling \u2192 Basket, Monitor & Checkout",
   "active": false,
   "settings": {
     "executionOrder": "v1"
@@ -68,6 +68,27 @@
                 ]
               },
               "outputKey": "live_arm"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.body.action }}",
+                    "rightValue": "watch"
+                  }
+                ]
+              },
+              "outputKey": "watch"
             }
           ]
         },
@@ -82,7 +103,8 @@
       "position": [
         -960,
         -260
-      ]
+      ],
+      "notes": "Three things arrive here: a basket to pin, a session to arm, and the nudge the dashboard sends when the seller connects their stream. The nudge needs no work \u2014 the room is already LIVE in the database and the twenty-second lane will pick it up \u2014 but it needs a branch, or the switch drops it and the call reads as a failure."
     },
     {
       "parameters": {
@@ -251,11 +273,11 @@
         600,
         -340
       ],
-      "notes": "An item the platform refused is reported FAILED with its reason, not skipped — a basket that quietly lost an item sells nothing and nobody finds out until the host calls for it."
+      "notes": "An item the platform refused is reported FAILED with its reason, not skipped \u2014 a basket that quietly lost an item sells nothing and nobody finds out until the host calls for it."
     },
     {
       "parameters": {
-        "jsCode": "// An armed session is one a human approved: they read the exact line the desk\n// will send a claimer and said yes to it. That approval is what the polling\n// lane below checks before it answers anybody.\nconst body = $input.first().json.body;\nconst session = body.session ?? {};\nreturn [{ json: { session_id: session.id, business_id: session.business_id,\n  platform: session.platform, armed: true } }];\n"
+        "jsCode": "// An armed session is one a human approved: they read the exact line the\n// desk will send a claimer and said yes to it. That approval is what the\n// polling lane below checks before it answers anybody.\n//\n// Arming is not going live. The seller starts their own stream in the\n// platform's app and then connects the room from the dashboard, which is\n// what moves the session to LIVE and gives it a room id. Setting LIVE\n// here instead used to skip both, and stamped every session with one\n// room id out of the environment \u2014 the same id for every business on the\n// deployment.\nconst body = $input.first().json.body;\nconst session = body.session ?? {};\nreturn [{ json: { session_id: session.id, business_id: session.business_id,\n  platform: session.platform, armed: true, status: session.status } }];\n"
       },
       "id": "d3000000-0000-4000-8000-000000000010",
       "name": "Start Watching",
@@ -265,40 +287,6 @@
         -740,
         -160
       ]
-    },
-    {
-      "parameters": {
-        "url": "={{ $env.BACKEND_URL }}/api/internal/live/{{ $json.session_id }}/state",
-        "method": "POST",
-        "options": {
-          "response": {
-            "response": {
-              "neverError": true
-            }
-          }
-        },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-internal-token",
-              "value": "={{ $env.INTERNAL_TOKEN }}"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ status: \"LIVE\", external_id: $env.LIVE_ROOM_ID || null }) }}"
-      },
-      "id": "d3000000-0000-4000-8000-000000000011",
-      "name": "Tell The Floor It Is Live",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        -520,
-        -160
-      ],
-      "notes": "423 if nobody armed it or it was paused. The backend will not let a workflow put a session live that a human has not approved."
     },
     {
       "parameters": {
@@ -334,7 +322,7 @@
         -1180,
         280
       ],
-      "notes": "A live room moves fast. Twenty seconds is close enough to answer a claim while the host is still on the item, and slow enough not to spend the platform’s rate limit on an empty room."
+      "notes": "A live room moves fast. Twenty seconds is close enough to answer a claim while the host is still on the item, and slow enough not to spend the platform\u2019s rate limit on an empty room."
     },
     {
       "parameters": {
@@ -405,7 +393,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Two numbers and a list of comments, from whichever API the platform has.\n//\n//   TikTok   live/202309/rooms/{id} carries viewers, likes and the basket\n//            taps — \"product clicks\" — which is the one metric Facebook has\n//            no equivalent for, because Facebook has no basket.\n//   Facebook the Live video node gives live_views and the comments edge. The\n//            comments are what matters: they are where the selling happens.\nconst crypto = require('crypto');\nconst creds = $('Room Credentials').item.json.credentials ?? {};\nconst item = $('One Room Each').item.json;\n\nif (!item.room_id) {\n  return [{ json: { ...item, skipped: true, error: 'no room id yet' } }];\n}\n\nif (item.platform === 'tiktok') {\n  if (!creds.access_token) {\n    return [{ json: { ...item, skipped: true, error: 'TIKTOK access_token is not set' } }];\n  }\n  const host = creds.host || 'https://open-api.tiktokglobalshop.com';\n  const path = `/live/202309/rooms/${item.room_id}`;\n  const params = { app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n                   timestamp: String(Math.floor(Date.now() / 1000)), version: '202309' };\n  const sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\n  const base = creds.app_secret + path + sorted + creds.app_secret;\n  const sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\n  return [{ json: { ...item,\n    url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n    access_token: creds.access_token } }];\n}\n\nif (!creds.page_access_token) {\n  return [{ json: { ...item, skipped: true, error: 'META page_access_token is not set' } }];\n}\nconst fields = 'live_views,status,comments.limit(50){from,message,created_time,id}';\nreturn [{ json: { ...item,\n  url: `https://graph.facebook.com/v21.0/${item.room_id}`\n     + `?fields=${encodeURIComponent(fields)}`\n     + `&access_token=${creds.page_access_token}` } }];\n"
+        "jsCode": "// Two numbers and a list of comments, from whichever API the platform has.\n//\n//   TikTok   live/202309/rooms/{id} carries viewers, likes and the basket\n//            taps \u2014 \"product clicks\" \u2014 which is the one metric Facebook has\n//            no equivalent for, because Facebook has no basket.\n//   Facebook the Live video node gives live_views and the comments edge. The\n//            comments are what matters: they are where the selling happens.\nconst crypto = require('crypto');\nconst creds = $('Room Credentials').item.json.credentials ?? {};\nconst item = $('One Room Each').item.json;\n\nif (!item.room_id) {\n  return [{ json: { ...item, skipped: true, error: 'no room id yet' } }];\n}\n\nif (item.platform === 'tiktok') {\n  if (!creds.access_token) {\n    return [{ json: { ...item, skipped: true, error: 'TIKTOK access_token is not set' } }];\n  }\n  const host = creds.host || 'https://open-api.tiktokglobalshop.com';\n  const path = `/live/202309/rooms/${item.room_id}`;\n  const params = { app_key: creds.app_key, shop_cipher: creds.shop_cipher,\n                   timestamp: String(Math.floor(Date.now() / 1000)), version: '202309' };\n  const sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\n  const base = creds.app_secret + path + sorted + creds.app_secret;\n  const sign = crypto.createHmac('sha256', creds.app_secret).update(base).digest('hex');\n  return [{ json: { ...item,\n    url: `${host}${path}?${new URLSearchParams({ ...params, sign })}`,\n    access_token: creds.access_token } }];\n}\n\nif (!creds.page_access_token) {\n  return [{ json: { ...item, skipped: true, error: 'META page_access_token is not set' } }];\n}\nconst fields = 'live_views,status,comments.limit(50){from,message,created_time,id}';\nreturn [{ json: { ...item,\n  url: `https://graph.facebook.com/v21.0/${item.room_id}`\n     + `?fields=${encodeURIComponent(fields)}`\n     + `&access_token=${creds.page_access_token}` } }];\n"
       },
       "id": "d3000000-0000-4000-8000-000000000017",
       "name": "Read The Room",
@@ -552,7 +540,7 @@
         580,
         180
       ],
-      "notes": "The monitor on the dashboard is drawn from these rows, so it survives the tab being closed — same rule as everything else here."
+      "notes": "The monitor on the dashboard is drawn from these rows, so it survives the tab being closed \u2014 same rule as everything else here."
     },
     {
       "parameters": {
@@ -621,7 +609,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// The link the claimer pays on. Nobody pays this app: on TikTok the cart is\n// the platform's own, and on Facebook — with Live Shopping gone — the seller\n// sends the buyer to their own checkout, which is why this falls back to\n// LIVE_CHECKOUT_BASE rather than pretending a Facebook basket exists.\nconst claim = $input.item.json;\nconst base = ($env.LIVE_CHECKOUT_BASE || '').replace(/\\/$/, '');\nif (!base) {\n  return [{ json: { ...claim, failed: true,\n    error: 'LIVE_CHECKOUT_BASE is not set, so there is no link to send' } }];\n}\nconst url = `${base}/${claim.claim_id}`;\nreturn [{ json: { ...claim, checkout_url: url,\n  // The blank the approved sentence was written around, filled in now and\n  // only now. Nothing else in the line is touched.\n  reply: String(claim.reply_template ?? '').replaceAll('{checkout_url}', url) } }];\n"
+        "jsCode": "// The link the claimer pays on. Nobody pays this app: on TikTok the cart\n// is the platform's own, and on Facebook \u2014 with Live Shopping gone \u2014 the\n// seller sends the buyer to their own checkout, which is why this needs\n// LIVE_CHECKOUT_BASE rather than pretending a Facebook basket exists.\n//\n// Neither piece is invented when it is missing. A claim nobody could be\n// told about is reported as exactly that: the hold stands, and the log\n// names the variable that was not set. A silently skipped reply looks\n// like an answered buyer, which is worse than an obvious gap.\nconst claim = $input.item.json;\nconst base = ($env.LIVE_CHECKOUT_BASE || '').replace(/\\/$/, '');\nconst replyTo = $env.LIVE_REPLY_WEBHOOK_URL || '';\nconst missing = [];\nif (!base) missing.push('LIVE_CHECKOUT_BASE');\nif (!replyTo) missing.push('LIVE_REPLY_WEBHOOK_URL');\nif (missing.length) {\n  return [{ json: { ...claim, sendable: false,\n    error: `${missing.join(' and ')} not set, so the claimer was told nothing` } }];\n}\nconst url = `${base}/${claim.claim_id}`;\nreturn [{ json: { ...claim, sendable: true, checkout_url: url, reply_to: replyTo,\n  // The blank the approved sentence was written around, filled in now and\n  // only now. Nothing else in the line is touched.\n  reply: String(claim.reply_template ?? '').replaceAll('{checkout_url}', url) } }];\n"
       },
       "id": "d3000000-0000-4000-8000-000000000024",
       "name": "Make The Checkout",
@@ -634,7 +622,39 @@
     },
     {
       "parameters": {
-        "url": "={{ $env.LIVE_REPLY_WEBHOOK_URL || ($env.BACKEND_URL + \"/api/health\") }}",
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.sendable }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d5000000-0000-4000-8000-0000000000a1",
+      "name": "Can We Tell Them?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        620
+      ],
+      "notes": "Without somewhere to send the line there is nothing to do but say so. This used to post the reply at the backend's health endpoint and then record the claim as answered."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.reply_to }}",
         "method": "POST",
         "options": {
           "response": {
@@ -679,7 +699,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ status: \"CHECKOUT_SENT\", checkout_url: $('Make The Checkout').item.json.checkout_url }) }}"
+        "jsonBody": "={{ JSON.stringify($('Make The Checkout').item.json.sendable ? { status: \"CHECKOUT_SENT\", checkout_url: $('Make The Checkout').item.json.checkout_url } : { status: \"HELD\", error: $('Make The Checkout').item.json.error }) }}"
       },
       "id": "d3000000-0000-4000-8000-000000000026",
       "name": "Record The Checkout",
@@ -688,7 +708,8 @@
       "position": [
         1460,
         380
-      ]
+      ],
+      "notes": "What actually happened. A claim nobody could be told about stays HELD and the reason goes in the action log, rather than reading as a checkout that was sent."
     },
     {
       "parameters": {
@@ -769,6 +790,13 @@
         [
           {
             "node": "Start Watching",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Acknowledged",
             "type": "main",
             "index": 0
           }
@@ -860,17 +888,6 @@
       ]
     },
     "Start Watching": {
-      "main": [
-        [
-          {
-            "node": "Tell The Floor It Is Live",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Tell The Floor It Is Live": {
       "main": [
         [
           {
@@ -1002,7 +1019,7 @@
       "main": [
         [
           {
-            "node": "Say It In The Room",
+            "node": "Can We Tell Them?",
             "type": "main",
             "index": 0
           }
@@ -1025,6 +1042,24 @@
         [
           {
             "node": "Put Back What Was Not Paid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can We Tell Them?": {
+      "main": [
+        [
+          {
+            "node": "Say It In The Room",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record The Checkout",
             "type": "main",
             "index": 0
           }

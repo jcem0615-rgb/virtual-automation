@@ -4,7 +4,7 @@
 // socket is ever cached — a stale approval queue would be worse than no app at
 // all. What is cached is the shell: the built assets, which carry a content
 // hash in their name and so can be served cache-first forever.
-const VERSION = 'v1';
+const VERSION = 'v2';   // bumped: tabs, the reflowing floor, photo upload, live connect
 const SHELL = `shell-${VERSION}`;
 const ASSETS = `assets-${VERSION}`;
 

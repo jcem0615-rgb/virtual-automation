@@ -56,8 +56,19 @@ services:
       # TikTok Content Posting API.
       TIKTOK_ACCESS_TOKEN: ${TIKTOK_ACCESS_TOKEN:-}
       TIKTOK_PRIVACY_LEVEL: ${TIKTOK_PRIVACY_LEVEL:-PUBLIC_TO_EVERYONE}
+      # Live selling. Unset, a claim is recorded as unanswered with the
+      # variable named, rather than the claimer being told nothing while the
+      # dashboard says a checkout went out.
+      LIVE_CHECKOUT_BASE: ${LIVE_CHECKOUT_BASE:-}
+      LIVE_REPLY_WEBHOOK_URL: ${LIVE_REPLY_WEBHOOK_URL:-}
     volumes:
       - n8ndata:/home/node/.n8n
+      # The workflows, so they can be imported in one command rather than
+      # eight trips through the editor:
+      #   docker compose exec n8n n8n import:workflow --separate --input=/workflows
+      # Read-only: n8n owns its copy once imported, and editing in the UI
+      # must not write back over what is in git.
+      - ./workflows:/workflows:ro
     ports:
       - "127.0.0.1:5678:5678"
     depends_on:
@@ -74,6 +85,12 @@ services:
       N8N_DISPATCH_WEBHOOK_URL: http://n8n:5678/webhook/approval-dispatch
       N8N_POST_SYNC_WEBHOOK_URL: http://n8n:5678/webhook/post-sync
       N8N_PRODUCT_SYNC_WEBHOOK_URL: http://n8n:5678/webhook/product-sync
+      # Unset, these fall back to the dispatch webhook, which routes by
+      # channel and knows nothing about a marketplace chat or a live room —
+      # so an approved reply and an approved basket both went nowhere, with
+      # the approval still reading as sent.
+      N8N_CHAT_WEBHOOK_URL: http://n8n:5678/webhook/chat-reply
+      N8N_LIVE_WEBHOOK_URL: http://n8n:5678/webhook/live-sync
       # 32 bytes, base64 or hex. Marketplace credentials are encrypted with it,
       # so losing it means reconnecting every seller account.
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}

@@ -1086,9 +1086,14 @@ export function registerLive(app, ctx) {
   app.post('/api/internal/live/claims/:id', wrap(async (req, res) => {
     const claimId = assertUuid(req.params.id, 'claim_id');
     const wanted = String(req.body?.status ?? '').toUpperCase();
-    if (!['CHECKOUT_SENT', 'PAID', 'EXPIRED', 'CANCELLED'].includes(wanted)) {
-      throw new HttpError(400, 'a claim goes to CHECKOUT_SENT, PAID, EXPIRED or CANCELLED');
+    // HELD means "nothing moved, and here is why" — a sender that could not
+    // do its job saying so, rather than a claim that reads as answered when
+    // nobody was told anything. The hold itself stands and expires normally.
+    if (!['HELD', 'CHECKOUT_SENT', 'PAID', 'EXPIRED', 'CANCELLED'].includes(wanted)) {
+      throw new HttpError(400,
+        'a claim goes to HELD, CHECKOUT_SENT, PAID, EXPIRED or CANCELLED');
     }
+    const why = String(req.body?.error ?? '').slice(0, 300) || null;
 
     const out = await tx(async (client) => {
       const { rows } = await client.query(
@@ -1112,6 +1117,17 @@ export function registerLive(app, ctx) {
         [claimId, wanted, req.body?.checkout_url ?? null,
          req.body?.order_id ? assertUuid(req.body.order_id, 'order_id') : null]);
 
+      // Nothing moved and nothing is owed back; the log carries the reason.
+      if (wanted === 'HELD') {
+        await logAction(client, {
+          businessId: claim.business_id,
+          action: 'LIVE_CLAIM_NOT_ANSWERED',
+          actor: 'n8n',
+          detail: { slot: claim.slot, product: claim.name, qty: claim.qty, error: why },
+        });
+        return { status: 'HELD', told: false, error: why };
+      }
+
       // A hold becomes a sale, or it goes back. Either way the basket's own
       // counters move, so the next claimer is told the truth.
       if (wanted === 'PAID') {
@@ -1129,7 +1145,8 @@ export function registerLive(app, ctx) {
         businessId: claim.business_id,
         action: `LIVE_CLAIM_${wanted}`,
         actor: 'n8n',
-        detail: { slot: claim.slot, product: claim.name, qty: claim.qty },
+        detail: { slot: claim.slot, product: claim.name, qty: claim.qty,
+                  ...(why ? { error: why } : {}) },
       });
       return { status: wanted };
     });
