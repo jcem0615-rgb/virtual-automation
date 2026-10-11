@@ -1288,10 +1288,13 @@ const POST_COLUMNS = `
   p.status, p.created_at, p.updated_at,
   COALESCE((
     SELECT json_agg(json_build_object(
+             'account_id', t.account_id, 'label', acc.label,
              'platform', t.platform, 'external_id', t.external_id,
              'state', t.state, 'last_synced_at', t.last_synced_at,
-             'last_error', t.last_error) ORDER BY t.platform)
-      FROM social_post_targets t WHERE t.post_id = p.id
+             'last_error', t.last_error) ORDER BY t.platform, acc.label)
+      FROM social_post_targets t
+      JOIN platform_accounts acc ON acc.id = t.account_id
+     WHERE t.post_id = p.id
   ), '[]') AS targets`;
 
 async function readPosts(scope, { platform, limit = 100 } = {}) {
@@ -1353,16 +1356,8 @@ app.patch('/api/posts/:id', wrap(async (req, res) => {
   const user = req.user;
   const title = req.body?.title == null ? null : String(req.body.title).trim();
   const body = req.body?.body == null ? null : String(req.body.body).trim();
-  const platforms = req.body?.platforms;
   if (body !== null && !body) throw new HttpError(400, 'body cannot be empty');
-  if (platforms !== undefined) {
-    if (!Array.isArray(platforms) || !platforms.length) {
-      throw new HttpError(400, 'platforms must be a non-empty list');
-    }
-    for (const p of platforms) {
-      if (!PLATFORMS.includes(p)) throw new HttpError(400, `unknown platform: ${p}`);
-    }
-  }
+  const asked = req.body?.account_ids ?? req.body?.platforms;
 
   const existing = await readPost(postId);
   if (!existing) throw new HttpError(404, 'post not found');
@@ -1370,7 +1365,12 @@ app.patch('/api/posts/:id', wrap(async (req, res) => {
 
   const nextTitle = title ?? existing.title;
   const nextBody = body ?? existing.body;
-  const targets = platforms ?? existing.targets.map((t) => t.platform);
+  // Left alone, a post keeps the accounts it already goes out on.
+  const accounts = asked === undefined
+    ? existing.targets.map((t) => ({ id: t.account_id, platform: t.platform, label: t.label }))
+    : await accountsFor(existing.business_id, req.body ?? {});
+  if (!accounts.length) throw new HttpError(400, 'say which accounts this goes out on');
+  const targets = [...new Set(accounts.map((a) => a.platform))];
   const live = existing.targets.filter((t) => t.state === 'PUBLISHED');
 
   // A post that has never been published anywhere is just a draft: save it.
@@ -1380,14 +1380,14 @@ app.patch('/api/posts/:id', wrap(async (req, res) => {
         `UPDATE social_posts SET title = $2, body = $3 WHERE id = $1 RETURNING id`,
         [postId, nextTitle, nextBody],
       );
-      await syncTargets(client, postId, targets);
+      await syncTargets(client, postId, accounts);
       await logAction(client, {
         businessId: existing.business_id,
         agentId: existing.agent_id,
         action: 'POST_EDITED',
         actor: user.email,
         actorUserId: user.id,
-        detail: { platforms: targets },
+        detail: { accounts: accounts.map((a) => a.label), platforms: targets },
       });
       return rows[0];
     });
@@ -1403,11 +1403,15 @@ app.patch('/api/posts/:id', wrap(async (req, res) => {
        RETURNING id, business_id, agent_id, status, payload_json, created_at`,
       [existing.business_id, existing.agent_id, JSON.stringify({
         type: 'post_update',
-        title: `Update "${existing.title}" on ${targets.join(', ')}`,
+        title: `Update "${existing.title}" on ${live.map((t) => t.label).join(', ')}`,
         draft: nextBody,
         channel: targets[0],
         post_id: postId,
         platforms: targets,
+        // The copies this chases, each on the account that carries it: a
+        // business with two pages has two copies and two ids out there.
+        targets: live.map((t) => ({ account_id: t.account_id, platform: t.platform,
+          label: t.label, external_id: t.external_id })),
         previous_body: existing.body,
         source: { post_id: postId, edited_by: user.email },
       })],
@@ -1416,8 +1420,8 @@ app.patch('/api/posts/:id', wrap(async (req, res) => {
       `UPDATE social_posts SET status = 'PENDING_UPDATE' WHERE id = $1`, [postId]);
     await client.query(
       `UPDATE social_post_targets SET state = 'UPDATE_PENDING'
-        WHERE post_id = $1 AND platform = ANY($2::text[]) AND state = 'PUBLISHED'`,
-      [postId, targets],
+        WHERE post_id = $1 AND account_id = ANY($2::uuid[]) AND state = 'PUBLISHED'`,
+      [postId, live.map((t) => t.account_id)],
     );
     if (existing.agent_id) {
       await settleAgent(client, {
@@ -1453,23 +1457,20 @@ app.post('/api/posts/:id/publish', wrap(async (req, res) => {
   if (!post) throw new HttpError(404, 'post not found');
   assertInScope(user, post.business_id);
 
-  const asked = req.body?.platforms;
-  if (asked !== undefined) {
-    if (!Array.isArray(asked) || !asked.length) {
-      throw new HttpError(400, 'platforms must be a non-empty list');
-    }
-    for (const p of asked) {
-      if (!PLATFORMS.includes(p)) throw new HttpError(400, `unknown platform: ${p}`);
-    }
-  }
+  // Either a list of accounts, or nothing at all, which means every copy
+  // that has not gone out yet.
+  const asked = req.body?.account_ids ?? req.body?.platforms;
+  const wanted = asked === undefined
+    ? null
+    : new Set((await accountsFor(post.business_id, req.body ?? {})).map((a) => a.id));
 
-  const pending = post.targets
+  const going = post.targets
     .filter((t) => ['NOT_PUBLISHED', 'FAILED'].includes(t.state))
-    .filter((t) => !asked || asked.includes(t.platform))
-    .map((t) => t.platform);
-  if (!pending.length) {
-    throw new HttpError(409, 'every platform you asked for already has this post');
+    .filter((t) => !wanted || wanted.has(t.account_id));
+  if (!going.length) {
+    throw new HttpError(409, 'every account you asked for already has this post');
   }
+  const pending = [...new Set(going.map((t) => t.platform))];
 
   const approval = await tx(async (client) => {
     const { rows } = await client.query(
@@ -1478,18 +1479,23 @@ app.post('/api/posts/:id/publish', wrap(async (req, res) => {
        RETURNING id`,
       [post.business_id, post.agent_id, JSON.stringify({
         type: 'post_publish',
-        title: `Publish "${post.title}" to ${pending.join(', ')}`,
+        title: `Publish "${post.title}" to ${going.map((t) => t.label).join(', ')}`,
         draft: post.body,
         channel: pending[0],
         post_id: postId,
         platforms: pending,
+        // Which account each copy goes out on. The sync workflow reads its
+        // credentials per account, so this is what decides whose page it
+        // lands on rather than whatever the environment happened to name.
+        targets: going.map((t) => ({ account_id: t.account_id, platform: t.platform,
+          label: t.label })),
         source: { post_id: postId, requested_by: user.email },
       })],
     );
     await client.query(
       `UPDATE social_post_targets SET state = 'PUBLISH_PENDING', last_error = NULL
-        WHERE post_id = $1 AND platform = ANY($2::text[])`,
-      [postId, pending],
+        WHERE post_id = $1 AND account_id = ANY($2::uuid[])`,
+      [postId, going.map((t) => t.account_id)],
     );
     if (post.agent_id) {
       await settleAgent(client, {
@@ -1506,28 +1512,80 @@ app.post('/api/posts/:id/publish', wrap(async (req, res) => {
       action: 'POST_PUBLISH_SUBMITTED',
       actor: user.email,
       actorUserId: user.id,
-      detail: { post_id: postId, platforms: pending },
+      detail: { post_id: postId, accounts: going.map((t) => t.label), platforms: pending },
     });
     return rows[0];
   });
 
-  res.json({ ok: true, needs_approval: true, approval_id: approval.id, platforms: pending });
+  res.json({
+    ok: true,
+    needs_approval: true,
+    approval_id: approval.id,
+    platforms: pending,
+    accounts: going.map((t) => ({ id: t.account_id, platform: t.platform, label: t.label })),
+  });
 }));
 
-/** Keep the target rows matching the platforms the post should go to. */
-async function syncTargets(client, postId, platforms) {
+/** Keep the target rows matching the accounts the post should go out on. */
+async function syncTargets(client, postId, accounts) {
+  const ids = accounts.map((a) => a.id);
   await client.query(
     `DELETE FROM social_post_targets
-      WHERE post_id = $1 AND NOT (platform = ANY($2::text[])) AND state <> 'PUBLISHED'`,
-    [postId, platforms],
+      WHERE post_id = $1 AND NOT (account_id = ANY($2::uuid[])) AND state <> 'PUBLISHED'`,
+    [postId, ids],
   );
-  for (const platform of platforms) {
+  for (const account of accounts) {
     await client.query(
-      `INSERT INTO social_post_targets (post_id, platform)
-       VALUES ($1, $2) ON CONFLICT (post_id, platform) DO NOTHING`,
-      [postId, platform],
+      `INSERT INTO social_post_targets (post_id, account_id, platform)
+       VALUES ($1, $2, $3) ON CONFLICT (post_id, account_id) DO NOTHING`,
+      [postId, account.id, account.platform],
     );
   }
+}
+
+/**
+ * Which connected accounts a request means.
+ *
+ * Accounts are the real thing — a post goes out on a page or a shop, not on
+ * a platform — so `account_ids` is the straight answer. A list of platforms
+ * is still accepted because it reads naturally and is what the older callers
+ * send, but it is only unambiguous while the business has one account there.
+ * With two Facebook pages, "facebook" is a question, not an instruction, and
+ * it is refused with both names rather than guessed at.
+ */
+async function accountsFor(businessId, { account_ids: accountIds, platforms }) {
+  const { rows: all } = await q(
+    `SELECT id, platform, label FROM platform_accounts
+      WHERE business_id = $1 ORDER BY platform, created_at`, [businessId]);
+
+  if (Array.isArray(accountIds) && accountIds.length) {
+    const picked = accountIds.map((id) => {
+      assertUuid(id, 'account_id');
+      const found = all.find((a) => a.id === id);
+      if (!found) throw new HttpError(404, 'that account is not on this business');
+      return found;
+    });
+    return picked;
+  }
+
+  if (!Array.isArray(platforms) || !platforms.length) {
+    throw new HttpError(400, 'say which accounts this goes out on');
+  }
+  const out = [];
+  for (const platform of platforms) {
+    if (!PLATFORMS.includes(platform)) throw new HttpError(400, `unknown platform: ${platform}`);
+    const here = all.filter((a) => a.platform === platform);
+    if (!here.length) {
+      throw new HttpError(400, `no ${platform} account is connected to this business`);
+    }
+    if (here.length > 1) {
+      throw new HttpError(400,
+        `this business has ${here.length} ${platform} accounts (${here.map((a) => a.label).join(', ')})`
+        + ' — say which one by account_id');
+    }
+    out.push(here[0]);
+  }
+  return out;
 }
 
 
@@ -2399,18 +2457,41 @@ app.post('/api/internal/posts', wrap(async (req, res) => {
     if (!business) return { notFound: true };
     if (!business.is_active) return { suspended: true };
 
-    // Does one of these platform copies already exist here?
-    const withIds = targets.filter((t) => t.external_id);
+    // Which account each copy is on. A post that comes in from the platform
+    // belongs to the account it was found on; told only a platform, that is
+    // unambiguous while the business has one account there.
+    const { rows: accounts } = await client.query(
+      `SELECT id, platform, label FROM platform_accounts
+        WHERE business_id = $1 ORDER BY platform, created_at`, [business.id]);
+    const resolved = [];
+    for (const target of targets) {
+      let account = null;
+      if (target.account_id) {
+        account = accounts.find((a) => a.id === target.account_id);
+      } else {
+        const here = accounts.filter((a) => a.platform === target.platform);
+        if (here.length === 1) [account] = here;
+      }
+      if (!account) {
+        return { noAccount: target.platform, several:
+          accounts.filter((a) => a.platform === target.platform).length > 1 };
+      }
+      resolved.push({ ...target, account });
+    }
+
+    // Does one of these copies already exist here?
+    const withIds = resolved.filter((t) => t.external_id);
     let postId = null;
     if (withIds.length) {
       const { rows } = await client.query(
         `SELECT p.id FROM social_posts p
            JOIN social_post_targets t ON t.post_id = p.id
           WHERE p.business_id = $1
-            AND (t.platform, t.external_id) IN (
-              SELECT * FROM unnest($2::text[], $3::text[]))
+            AND (t.account_id, t.external_id) IN (
+              SELECT * FROM unnest($2::uuid[], $3::text[]))
           LIMIT 1`,
-        [business.id, withIds.map((t) => t.platform), withIds.map((t) => String(t.external_id))],
+        [business.id, withIds.map((t) => t.account.id),
+         withIds.map((t) => String(t.external_id))],
       );
       postId = rows[0]?.id ?? null;
     }
@@ -2437,16 +2518,17 @@ app.post('/api/internal/posts', wrap(async (req, res) => {
       postId = rows[0].id;
     }
 
-    for (const target of targets) {
+    for (const target of resolved) {
       await client.query(
-        `INSERT INTO social_post_targets (post_id, platform, external_id, state, last_synced_at)
-         VALUES ($1, $2, $3, $4, now())
-         ON CONFLICT (post_id, platform) DO UPDATE
+        `INSERT INTO social_post_targets
+           (post_id, account_id, platform, external_id, state, last_synced_at)
+         VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (post_id, account_id) DO UPDATE
            SET external_id = EXCLUDED.external_id,
                state = EXCLUDED.state,
                last_synced_at = now(),
                last_error = NULL`,
-        [postId, target.platform, target.external_id ?? null,
+        [postId, target.account.id, target.account.platform, target.external_id ?? null,
          target.external_id ? 'PUBLISHED' : 'NOT_PUBLISHED'],
       );
     }
@@ -2456,7 +2538,7 @@ app.post('/api/internal/posts', wrap(async (req, res) => {
       agentId,
       action: 'POST_SYNCED_IN',
       actor: 'n8n',
-      detail: { platforms: targets.map((t) => t.platform) },
+      detail: { accounts: resolved.map((t) => t.account.label) },
     });
     return { postId };
   });
@@ -2466,6 +2548,14 @@ app.post('/api/internal/posts', wrap(async (req, res) => {
     res.status(423).json({ ok: false, status: 'SUSPENDED',
       error: 'this business is suspended — post not synced' });
     return;
+  }
+  // A copy with no account behind it has nowhere to live and nothing to be
+  // published with, so it is refused here rather than written as a row that
+  // can never sync.
+  if (result.noAccount) {
+    throw new HttpError(400, result.several
+      ? `this business has several ${result.noAccount} accounts — name one by account_id`
+      : `no ${result.noAccount} account is connected to this business`);
   }
   res.status(201).json({ ok: true, post: await readPost(result.postId) });
 }));
@@ -2619,13 +2709,33 @@ app.post('/api/internal/posts/:id/targets', wrap(async (req, res) => {
   const postId = assertUuid(req.params.id, 'post_id');
   const { platform, external_id: externalId, error } = req.body ?? {};
   const state = req.body?.state;
-  if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
   if (!['PUBLISHED', 'FAILED', 'NOT_PUBLISHED'].includes(state)) {
     throw new HttpError(400, 'state must be PUBLISHED, FAILED or NOT_PUBLISHED');
   }
 
   const post = await readPost(postId);
   if (!post) throw new HttpError(404, 'post not found');
+
+  // Which copy this is about. The account is the answer; a platform on its
+  // own only is while the post goes to one account there, so a business with
+  // two pages gets told to name which, rather than having both rows written
+  // with one page's result.
+  const accountId = req.body?.account_id
+    ? assertUuid(req.body.account_id, 'account_id') : null;
+  let target = null;
+  if (accountId) {
+    target = post.targets.find((t) => t.account_id === accountId);
+    if (!target) throw new HttpError(404, 'that account does not carry this post');
+  } else {
+    if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'unknown platform');
+    const here = post.targets.filter((t) => t.platform === platform);
+    if (!here.length) throw new HttpError(404, `this post has no ${platform} copy`);
+    if (here.length > 1) {
+      throw new HttpError(400,
+        `this post goes to ${here.length} ${platform} accounts — name one by account_id`);
+    }
+    target = here[0];
+  }
 
   await tx(async (client) => {
     await client.query(
@@ -2634,8 +2744,8 @@ app.post('/api/internal/posts/:id/targets', wrap(async (req, res) => {
               external_id = COALESCE($4, external_id),
               last_synced_at = now(),
               last_error = $5
-        WHERE post_id = $1 AND platform = $2`,
-      [postId, platform, state, externalId ?? null, error ?? null],
+        WHERE post_id = $1 AND account_id = $2`,
+      [postId, target.account_id, state, externalId ?? null, error ?? null],
     );
     // Once nothing is still pending, the post itself is settled again.
     await client.query(

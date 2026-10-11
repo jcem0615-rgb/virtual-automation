@@ -408,27 +408,8 @@ CREATE TABLE IF NOT EXISTS social_posts (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS social_post_targets (
-  post_id        uuid NOT NULL REFERENCES social_posts(id) ON DELETE CASCADE,
-  platform       text NOT NULL
-                 CHECK (platform IN ('facebook','instagram','tiktok','shopee','lazada','x')),
-  external_id    text,
-  state          text NOT NULL DEFAULT 'NOT_PUBLISHED'
-                 CHECK (state IN ('NOT_PUBLISHED','PUBLISHED','UPDATE_PENDING','FAILED')),
-  last_synced_at timestamptz,
-  last_error     text,
-  PRIMARY KEY (post_id, platform)
-);
-
 CREATE INDEX IF NOT EXISTS social_posts_business_idx
   ON social_posts (business_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS social_post_targets_platform_idx
-  ON social_post_targets (platform, state);
-
--- One row per platform copy, so n8n can be told exactly which ones to update.
-CREATE UNIQUE INDEX IF NOT EXISTS social_post_targets_external_idx
-  ON social_post_targets (platform, external_id) WHERE external_id IS NOT NULL;
-
 DROP TRIGGER IF EXISTS social_posts_touch ON social_posts;
 CREATE TRIGGER social_posts_touch
   BEFORE UPDATE ON social_posts
@@ -438,12 +419,6 @@ DROP TRIGGER IF EXISTS social_posts_notify ON social_posts;
 CREATE TRIGGER social_posts_notify
   AFTER INSERT OR UPDATE OR DELETE ON social_posts
   FOR EACH ROW EXECUTE FUNCTION notify_office_event('social_post');
-
--- A platform copy can also be on its way out for the first time, which is a
--- different thing from an edit chasing an already-live post.
-ALTER TABLE social_post_targets DROP CONSTRAINT IF EXISTS social_post_targets_state_check;
-ALTER TABLE social_post_targets ADD CONSTRAINT social_post_targets_state_check
-  CHECK (state IN ('NOT_PUBLISHED','PUBLISH_PENDING','PUBLISHED','UPDATE_PENDING','FAILED'));
 
 -- ------------------------------------------------- connected accounts
 -- A business can have several accounts on the same platform: two Shopee
@@ -480,6 +455,98 @@ DROP TRIGGER IF EXISTS platform_accounts_touch ON platform_accounts;
 CREATE TRIGGER platform_accounts_touch
   BEFORE UPDATE ON platform_accounts
   FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+-- A copy of a post on one connected account. Keyed by account rather than by
+-- platform for the same reason product_listings is: a business can hold two
+-- Facebook pages or two Shopee shops, and a post on one of them is not a post
+-- on the other. `platform` stays as well, denormalised from the account, so
+-- filtering and the sync workflow's branching read straight off the row.
+CREATE TABLE IF NOT EXISTS social_post_targets (
+  post_id        uuid NOT NULL REFERENCES social_posts(id) ON DELETE CASCADE,
+  account_id     uuid NOT NULL REFERENCES platform_accounts(id) ON DELETE CASCADE,
+  platform       text NOT NULL
+                 CHECK (platform IN ('facebook','instagram','tiktok','shopee','lazada','x')),
+  external_id    text,
+  -- On its way out for the first time is a different thing from an edit
+  -- chasing an already-live copy, so they are separate states.
+  state          text NOT NULL DEFAULT 'NOT_PUBLISHED'
+                 CHECK (state IN ('NOT_PUBLISHED','PUBLISH_PENDING','PUBLISHED',
+                                  'UPDATE_PENDING','FAILED')),
+  last_synced_at timestamptz,
+  last_error     text,
+  PRIMARY KEY (post_id, account_id)
+);
+
+-- Moving an existing deployment onto that key. A target used to name only a
+-- platform, so the account it meant is the one that business has on that
+-- platform. Where there is exactly one, it is unambiguous and gets filled in;
+-- where there is none the target could never have been published anyway —
+-- there were no credentials to publish it with — so it goes.
+-- Keyed on where it has to end up, not on how far it got: a run that added
+-- the column and then stopped must finish the job next time, not skip it.
+DO $migrate$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+     WHERE i.indrelid = 'social_post_targets'::regclass AND i.indisprimary
+       AND a.attname = 'account_id'
+  ) THEN
+    RETURN;
+  END IF;
+
+  ALTER TABLE social_post_targets ADD COLUMN IF NOT EXISTS account_id uuid
+    REFERENCES platform_accounts(id) ON DELETE CASCADE;
+
+  UPDATE social_post_targets t SET account_id = (
+    SELECT a.id FROM platform_accounts a
+      JOIN social_posts p ON p.id = t.post_id
+     WHERE a.business_id = p.business_id AND a.platform = t.platform
+     ORDER BY a.created_at LIMIT 1)
+   WHERE t.account_id IS NULL;
+
+  DELETE FROM social_post_targets WHERE account_id IS NULL;
+
+  ALTER TABLE social_post_targets DROP CONSTRAINT social_post_targets_pkey;
+  ALTER TABLE social_post_targets ALTER COLUMN account_id SET NOT NULL;
+  ALTER TABLE social_post_targets
+    ADD CONSTRAINT social_post_targets_pkey PRIMARY KEY (post_id, account_id);
+END
+$migrate$;
+
+-- Losing the account takes the copy with it: the row names a copy on that
+-- account, so without it there is nothing left to name. Checked on every run
+-- rather than once, because a database that went through an earlier draft of
+-- the migration above carries ON DELETE SET NULL, and nulling that column
+-- breaks the very key the table is now built on.
+DO $fk$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint
+              WHERE conrelid = 'social_post_targets'::regclass
+                AND conname = 'social_post_targets_account_id_fkey'
+                AND confdeltype <> 'c') THEN
+    ALTER TABLE social_post_targets
+      DROP CONSTRAINT social_post_targets_account_id_fkey;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'social_post_targets'::regclass
+                    AND conname = 'social_post_targets_account_id_fkey') THEN
+    ALTER TABLE social_post_targets
+      ADD CONSTRAINT social_post_targets_account_id_fkey
+      FOREIGN KEY (account_id) REFERENCES platform_accounts(id) ON DELETE CASCADE;
+  END IF;
+END
+$fk$;
+
+CREATE INDEX IF NOT EXISTS social_post_targets_platform_idx
+  ON social_post_targets (platform, state);
+CREATE INDEX IF NOT EXISTS social_post_targets_account_idx
+  ON social_post_targets (account_id, state);
+
+-- One row per copy on one account: the same post on two Facebook pages is
+-- two posts as far as Facebook is concerned, with two ids.
+CREATE UNIQUE INDEX IF NOT EXISTS social_post_targets_external_idx
+  ON social_post_targets (account_id, external_id) WHERE external_id IS NOT NULL;
 
 -- ------------------------------------------------------------ products
 -- The business's own catalogue. A product lives here and is listed on

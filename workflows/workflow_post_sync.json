@@ -1,5 +1,5 @@
 {
-  "name": "Post Sync — publish or edit on each platform",
+  "name": "Post Sync \u2014 publish or edit on each platform",
   "active": false,
   "settings": {
     "executionOrder": "v1"
@@ -25,16 +25,41 @@
     },
     {
       "parameters": {
-        "jsCode": "// One item per platform copy, tagged with what has to happen to it.\n// An external id means the platform already holds a copy, so this is an edit;\n// no id means it has never gone out, so this is a first publish.\nconst body = $input.first().json.body;\nconst post = body.post;\nconst wanted = body.payload.platforms ?? [];\n\nreturn post.targets\n  .filter((t) => wanted.includes(t.platform))\n  .map((t) => ({ json: {\n    post_id: post.id,\n    platform: t.platform,\n    external_id: t.external_id ?? null,\n    action: t.external_id ? 'update' : 'publish',\n    body: body.payload.draft,\n    title: post.title,\n    media_url: post.media_url ?? null,\n  } }));"
+        "jsCode": "// One item per copy, tagged with what has to happen to it and which\n// account carries it. A copy belongs to a page or a shop, not to a\n// platform in the abstract: a business with two Facebook pages has two\n// copies out there with two ids, and each is edited with that page's own\n// token \u2014 which is why the account id travels with the item from here.\n//\n// An external id means the platform already holds a copy, so this is an\n// edit; no id means it has never gone out, so this is a first publish.\nconst body = $input.first().json.body;\nconst post = body.post;\n// The approval names the copies it is for. Older ones named platforms,\n// which is the same thing while a business has one account per platform.\nconst wantedAccounts = (body.payload.targets ?? []).map((t) => t.account_id);\nconst wantedPlatforms = body.payload.platforms ?? [];\n\nreturn post.targets\n  .filter((t) => (wantedAccounts.length\n    ? wantedAccounts.includes(t.account_id)\n    : wantedPlatforms.includes(t.platform)))\n  .map((t) => ({ json: {\n    post_id: post.id,\n    account_id: t.account_id,\n    account_label: t.label ?? null,\n    platform: t.platform,\n    external_id: t.external_id ?? null,\n    action: t.external_id ? 'update' : 'publish',\n    body: body.payload.draft,\n    title: post.title,\n    media_url: post.media_url ?? null,\n  } }));\n"
       },
       "id": "d1000000-0000-4000-8000-000000000002",
-      "name": "One Item Per Platform",
+      "name": "One Item Per Account",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
         -540,
         300
       ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.account_id }}/credentials",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d6000000-0000-4000-8000-0000000000b1",
+      "name": "Account Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        40
+      ],
+      "notes": "The keys for the one account this copy is on. They used to come out of $env, which meant every business on the deployment posted from whichever single shop the environment named."
     },
     {
       "parameters": {
@@ -122,13 +147,13 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $json.action === 'update' ? 'https://graph.facebook.com/v21.0/' + $json.external_id : 'https://graph.facebook.com/v21.0/' + ($env.META_PAGE_ID || 'me') + '/feed' }}",
+        "url": "={{ $json.action === 'update' ? 'https://graph.facebook.com/v21.0/' + $json.external_id : 'https://graph.facebook.com/v21.0/' + ($('Account Credentials').item.json.credentials.page_id || $('Account Credentials').item.json.external_id || 'me') + '/feed' }}",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
             {
               "name": "access_token",
-              "value": "={{ $env.META_PAGE_ACCESS_TOKEN }}"
+              "value": "={{ $('Account Credentials').item.json.credentials.page_access_token }}"
             }
           ]
         },
@@ -153,11 +178,11 @@
         -80,
         120
       ],
-      "notes": "An edit is POST /{post-id}; a first publish is POST /{page-id}/feed. Both need pages_manage_posts on the token."
+      "notes": "The page's own token, from the account this copy is on. A deployment-wide token posted every business's updates to one page."
     },
     {
       "parameters": {
-        "jsCode": "// Instagram does not let the Graph API edit a published caption. The honest\n// thing is to report it rather than pretend the platform was updated: the\n// dashboard then shows that copy as failed, with this reason on it.\nreturn $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: 'Instagram captions cannot be edited through the API — update this one in the app, or delete and repost.',\n} }));"
+        "jsCode": "// Instagram does not let the Graph API edit a published caption. The honest\n// thing is to report it rather than pretend the platform was updated: the\n// dashboard then shows that copy as failed, with this reason on it.\nreturn $input.all().map((item) => ({ json: {\n  ...item.json,\n  state: 'FAILED',\n  error: 'Instagram captions cannot be edited through the API \u2014 update this one in the app, or delete and repost.',\n} }));"
       },
       "id": "d1000000-0000-4000-8000-000000000005",
       "name": "Instagram Cannot Edit",
@@ -226,7 +251,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Shopee signs every call. The base string for a shop-level API is\n//   partner_id + api_path + timestamp + access_token + shop_id\n// hashed with HMAC-SHA256 under the partner key, hex, lower case.\n// Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto, which docker-compose.yml sets.\nconst crypto = require('crypto');\n\nconst partnerId = Number($env.SHOPEE_PARTNER_ID);\nconst partnerKey = $env.SHOPEE_PARTNER_KEY;\nconst shopId = Number($env.SHOPEE_SHOP_ID);\nconst accessToken = $env.SHOPEE_ACCESS_TOKEN;\nconst host = $env.SHOPEE_HOST || 'https://partner.shopeemobile.com';\n\nreturn $input.all().map((item) => {\n  const missing = [];\n  if (!partnerId) missing.push('SHOPEE_PARTNER_ID');\n  if (!partnerKey) missing.push('SHOPEE_PARTNER_KEY');\n  if (!shopId) missing.push('SHOPEE_SHOP_ID');\n  if (!accessToken) missing.push('SHOPEE_ACCESS_TOKEN');\n  if (missing.length) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'Shopee is not configured: ' + missing.join(', ') + ' are unset.' } };\n  }\n\n  // Shopee has no \"create a listing from a caption\" call — a new item needs a\n  // category, attributes and logistics. Editing an existing one is the part\n  // that maps onto a post, so a first publish is reported rather than faked.\n  if (item.json.action === 'publish') {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'Shopee listings are created in Seller Centre; this app can edit one once it exists.' } };\n  }\n\n  const path = '/api/v2/product/update_item';\n  const timestamp = Math.floor(Date.now() / 1000);\n  const base = `${partnerId}${path}${timestamp}${accessToken}${shopId}`;\n  const sign = crypto.createHmac('sha256', partnerKey).update(base).digest('hex');\n\n  return { json: { ...item.json, skip: false,\n    url: `${host}${path}?partner_id=${partnerId}&timestamp=${timestamp}`\n       + `&access_token=${accessToken}&shop_id=${shopId}&sign=${sign}`,\n    payload: { item_id: Number(item.json.external_id), description: item.json.body },\n  } };\n});"
+        "jsCode": "// Shopee signs every call. The base string for a shop-level API is\n//   partner_id + api_path + timestamp + access_token + shop_id\n// hashed with HMAC-SHA256 under the partner key, hex, lower case.\n// Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto, which docker-compose.yml sets.\n//\n// The keys belong to the shop this copy is on, not to the deployment.\n// Read from $env they were the same for every business on it, so one\n// seller's post went out of another seller's shop.\nconst crypto = require('crypto');\n\nconst creds = $('Account Credentials').item.json.credentials ?? {};\nconst shop = $('One Item Per Account').item.json.account_label || 'this shop';\nconst partnerId = Number(creds.partner_id);\nconst partnerKey = creds.partner_key;\nconst shopId = Number(creds.shop_id);\nconst accessToken = creds.access_token;\nconst host = creds.host || $env.SHOPEE_HOST || 'https://partner.shopeemobile.com';\n\nreturn $input.all().map((item) => {\n  const missing = [];\n  if (!partnerId) missing.push('partner_id');\n  if (!partnerKey) missing.push('partner_key');\n  if (!shopId) missing.push('shop_id');\n  if (!accessToken) missing.push('access_token');\n  if (missing.length) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: `Shopee ${missing.join(', ')} ${missing.length > 1 ? 'are' : 'is'}`\n        + ` not set for ${shop} \u2014 reconnect it.` } };\n  }\n\n  // Shopee has no \"create a listing from a caption\" call \u2014 a new item needs a\n  // category, attributes and logistics. Editing an existing one is the part\n  // that maps onto a post, so a first publish is reported rather than faked.\n  if (item.json.action === 'publish') {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'Shopee listings are created in Seller Centre; this app can edit one once it exists.' } };\n  }\n\n  const path = '/api/v2/product/update_item';\n  const timestamp = Math.floor(Date.now() / 1000);\n  const base = `${partnerId}${path}${timestamp}${accessToken}${shopId}`;\n  const sign = crypto.createHmac('sha256', partnerKey).update(base).digest('hex');\n\n  return { json: { ...item.json, skip: false,\n    url: `${host}${path}?partner_id=${partnerId}&timestamp=${timestamp}`\n       + `&access_token=${accessToken}&shop_id=${shopId}&sign=${sign}`,\n    payload: { item_id: Number(item.json.external_id), description: item.json.body },\n  } };\n});"
       },
       "id": "d1000000-0000-4000-8000-000000000010",
       "name": "Sign Shopee Request",
@@ -311,7 +336,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// TikTok's Content Posting API can put a post up, but there is no endpoint to\n// change one after it is live — so an edit is reported honestly instead of\n// being silently dropped.\nreturn $input.all().map((item) => {\n  if (!$env.TIKTOK_ACCESS_TOKEN) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok is not configured: TIKTOK_ACCESS_TOKEN is unset.' } };\n  }\n  if (item.json.action === 'update') {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok posts cannot be edited after publishing — delete and repost, or edit in the app only.' } };\n  }\n  if (!item.json.media_url) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok needs an image or video; this post has no media.' } };\n  }\n  const isVideo = /\\.(mp4|mov|webm)(\\?|$)/i.test(item.json.media_url);\n  return { json: { ...item.json, skip: false,\n    url: 'https://open.tiktokapis.com/v2/post/publish/'\n       + (isVideo ? 'video' : 'content') + '/init/',\n    payload: {\n      post_info: {\n        title: item.json.title.slice(0, 90),\n        description: item.json.body.slice(0, 4000),\n        privacy_level: $env.TIKTOK_PRIVACY_LEVEL || 'PUBLIC_TO_EVERYONE',\n      },\n      source_info: isVideo\n        ? { source: 'PULL_FROM_URL', video_url: item.json.media_url }\n        : { source: 'PULL_FROM_URL', photo_cover_index: 0, photo_images: [item.json.media_url] },\n      post_mode: 'DIRECT_POST',\n      media_type: isVideo ? 'VIDEO' : 'PHOTO',\n    },\n  } };\n});"
+        "jsCode": "// TikTok's Content Posting API can put a post up, but there is no endpoint to\n// change one after it is live \u2014 so an edit is reported honestly instead of\n// being silently dropped.\n// The token belongs to the account this copy is on, not to the deployment.\nconst creds = $('Account Credentials').item.json.credentials ?? {};\nconst shop = $('One Item Per Account').item.json.account_label || 'this account';\n\nreturn $input.all().map((item) => {\n  if (!creds.access_token) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: `TikTok access_token is not set for ${shop} \u2014 reconnect it.` } };\n  }\n  if (item.json.action === 'update') {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok posts cannot be edited after publishing \u2014 delete and repost, or edit in the app only.' } };\n  }\n  if (!item.json.media_url) {\n    return { json: { ...item.json, skip: true, state: 'FAILED',\n      error: 'TikTok needs an image or video; this post has no media.' } };\n  }\n  const isVideo = /\\.(mp4|mov|webm)(\\?|$)/i.test(item.json.media_url);\n  return { json: { ...item.json, skip: false, access_token: creds.access_token,\n    url: 'https://open.tiktokapis.com/v2/post/publish/'\n       + (isVideo ? 'video' : 'content') + '/init/',\n    payload: {\n      post_info: {\n        title: item.json.title.slice(0, 90),\n        description: item.json.body.slice(0, 4000),\n        privacy_level: $env.TIKTOK_PRIVACY_LEVEL || 'PUBLIC_TO_EVERYONE',\n      },\n      source_info: isVideo\n        ? { source: 'PULL_FROM_URL', video_url: item.json.media_url }\n        : { source: 'PULL_FROM_URL', photo_cover_index: 0, photo_images: [item.json.media_url] },\n      post_mode: 'DIRECT_POST',\n      media_type: isVideo ? 'VIDEO' : 'PHOTO',\n    },\n  } };\n});"
       },
       "id": "d1000000-0000-4000-8000-000000000014",
       "name": "Prepare TikTok Post",
@@ -362,7 +387,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "=Bearer {{ $env.TIKTOK_ACCESS_TOKEN }}"
+              "value": "=Bearer {{ $json.access_token }}"
             },
             {
               "name": "Content-Type",
@@ -426,18 +451,18 @@
       "main": [
         [
           {
-            "node": "One Item Per Platform",
+            "node": "One Item Per Account",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "One Item Per Platform": {
+    "One Item Per Account": {
       "main": [
         [
           {
-            "node": "Which Platform",
+            "node": "Account Credentials",
             "type": "main",
             "index": 0
           }
@@ -627,6 +652,17 @@
         [
           {
             "node": "Report Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Account Credentials": {
+      "main": [
+        [
+          {
+            "node": "Which Platform",
             "type": "main",
             "index": 0
           }

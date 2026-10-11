@@ -274,6 +274,11 @@ export default function ProductsPanel({ businessId, isOwner, onSignedOut }) {
                     <img
                       src={product.images[0]}
                       alt=""
+                      // A photo can go missing — the file was swept, or the
+                      // product was written by a sync that named one that was
+                      // never uploaded. A broken-image box says less than no
+                      // box at all.
+                      onError={(e) => { e.currentTarget.style.display = 'none'; }}
                       className="h-12 w-12 shrink-0 rounded-lg border border-slate-800 object-cover"
                     />
                   )}

@@ -25,6 +25,37 @@
     },
     {
       "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts/{{ $json.body.payload.account_id }}/credentials",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d8000000-0000-4000-8000-0000000000d1",
+      "name": "Sender Credentials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -180,
+        120
+      ],
+      "notes": "The keys of the account this reply has to go out on. The approval names it; read from $env instead, one seller's reply went out of another seller's shop."
+    },
+    {
+      "parameters": {
         "rules": {
           "values": [
             {
@@ -40,7 +71,7 @@
                       "type": "string",
                       "operation": "equals"
                     },
-                    "leftValue": "={{ $json.body.payload.channel }}",
+                    "leftValue": "={{ $('Approval Webhook').item.json.body.payload.channel }}",
                     "rightValue": "email"
                   }
                 ]
@@ -61,7 +92,7 @@
                       "type": "string",
                       "operation": "equals"
                     },
-                    "leftValue": "={{ $json.body.payload.channel }}",
+                    "leftValue": "={{ $('Approval Webhook').item.json.body.payload.channel }}",
                     "rightValue": "meta_dm"
                   }
                 ]
@@ -82,7 +113,7 @@
                       "type": "string",
                       "operation": "equals"
                     },
-                    "leftValue": "={{ $json.body.payload.channel }}",
+                    "leftValue": "={{ $('Approval Webhook').item.json.body.payload.channel }}",
                     "rightValue": "shopee"
                   }
                 ]
@@ -109,7 +140,7 @@
     {
       "parameters": {},
       "id": "b1000000-0000-4000-8000-000000000003",
-      "name": "Send Email — PLACEHOLDER",
+      "name": "Send Email \u2014 PLACEHOLDER",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
@@ -127,13 +158,13 @@
           "parameters": [
             {
               "name": "access_token",
-              "value": "={{ $env.META_PAGE_ACCESS_TOKEN }}"
+              "value": "={{ $('Sender Credentials').item.json.credentials.page_access_token }}"
             }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ recipient: { id: $json.body.payload.recipient }, messaging_type: 'RESPONSE', message: { text: $json.body.payload.draft } }) }}",
+        "jsonBody": "={{ JSON.stringify({ recipient: { id: $('Approval Webhook').item.json.body.payload.recipient }, messaging_type: 'RESPONSE', message: { text: $('Approval Webhook').item.json.body.payload.draft } }) }}",
         "options": {
           "timeout": 20000
         }
@@ -146,7 +177,7 @@
         -140,
         260
       ],
-      "notes": "Sends the approved text to the customer's Messenger thread. The 24-hour standard messaging window applies; outside it you need a message tag."
+      "notes": "The page's own token, from the account the message arrived on."
     },
     {
       "parameters": {},
@@ -186,7 +217,7 @@
         160,
         300
       ],
-      "notes": "Releasing never moves a PAUSED agent — the backend guards that."
+      "notes": "Releasing never moves a PAUSED agent \u2014 the backend guards that."
     },
     {
       "parameters": {
@@ -205,7 +236,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Shopee's Seller Chat, signed the same way as any other shop API:\n//   partner_id + api_path + timestamp + access_token + shop_id\n// HMAC-SHA256 under the partner key. Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto.\nconst crypto = require('crypto');\n\nconst partnerId = Number($env.SHOPEE_PARTNER_ID);\nconst partnerKey = $env.SHOPEE_PARTNER_KEY;\nconst shopId = Number($env.SHOPEE_SHOP_ID);\nconst accessToken = $env.SHOPEE_ACCESS_TOKEN;\nconst host = $env.SHOPEE_HOST || 'https://partner.shopeemobile.com';\n\nconst payload = $input.first().json.body.payload;\nconst missing = [];\nif (!partnerId) missing.push('SHOPEE_PARTNER_ID');\nif (!partnerKey) missing.push('SHOPEE_PARTNER_KEY');\nif (!shopId) missing.push('SHOPEE_SHOP_ID');\nif (!accessToken) missing.push('SHOPEE_ACCESS_TOKEN');\nif (missing.length) {\n  throw new Error('Shopee is not configured: ' + missing.join(', ') + ' are unset.');\n}\nif (!payload.recipient) {\n  throw new Error('No Shopee buyer id on this approval, so there is nobody to reply to.');\n}\n\nconst path = '/api/v2/sellerchat/send_message';\nconst timestamp = Math.floor(Date.now() / 1000);\nconst base = `${partnerId}${path}${timestamp}${accessToken}${shopId}`;\nconst sign = crypto.createHmac('sha256', partnerKey).update(base).digest('hex');\n\nreturn [{ json: {\n  url: `${host}${path}?partner_id=${partnerId}&timestamp=${timestamp}`\n     + `&access_token=${accessToken}&shop_id=${shopId}&sign=${sign}`,\n  payload: {\n    to_id: Number(payload.recipient),\n    message_type: 'text',\n    content: { text: payload.draft },\n  },\n} }];"
+        "jsCode": "// Shopee's Seller Chat, signed the same way as any other shop API:\n//   partner_id + api_path + timestamp + access_token + shop_id\n// HMAC-SHA256 under the partner key. Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto.\n//\n// The keys belong to the shop this conversation is on. Read from $env they\n// were the same for every business on the deployment, so a reply could go\n// out of a shop that had nothing to do with the buyer who asked.\nconst crypto = require('crypto');\n\nconst creds = $('Sender Credentials').item.json.credentials ?? {};\nconst shop = $('Approval Webhook').item.json.body.payload.account_label\n  || 'the shop this conversation is on';\nconst partnerId = Number(creds.partner_id);\nconst partnerKey = creds.partner_key;\nconst shopId = Number(creds.shop_id);\nconst accessToken = creds.access_token;\nconst host = creds.host || $env.SHOPEE_HOST || 'https://partner.shopeemobile.com';\n\nconst payload = $input.first().json.body.payload;\nconst missing = [];\nif (!partnerId) missing.push('partner_id');\nif (!partnerKey) missing.push('partner_key');\nif (!shopId) missing.push('shop_id');\nif (!accessToken) missing.push('access_token');\nif (missing.length) {\n  throw new Error(`Shopee ${missing.join(', ')} not set for ${shop} \u2014 reconnect it.`);\n}\nif (!payload.recipient) {\n  throw new Error('No Shopee buyer id on this approval, so there is nobody to reply to.');\n}\n\nconst path = '/api/v2/sellerchat/send_message';\nconst timestamp = Math.floor(Date.now() / 1000);\nconst base = `${partnerId}${path}${timestamp}${accessToken}${shopId}`;\nconst sign = crypto.createHmac('sha256', partnerKey).update(base).digest('hex');\n\nreturn [{ json: {\n  url: `${host}${path}?partner_id=${partnerId}&timestamp=${timestamp}`\n     + `&access_token=${accessToken}&shop_id=${shopId}&sign=${sign}`,\n  payload: {\n    to_id: Number(payload.recipient),\n    message_type: 'text',\n    content: { text: payload.draft },\n  },\n} }];"
       },
       "id": "b1000000-0000-4000-8000-000000000010",
       "name": "Sign Shopee Chat",
@@ -244,7 +275,7 @@
       "main": [
         [
           {
-            "node": "Route By Channel",
+            "node": "Sender Credentials",
             "type": "main",
             "index": 0
           }
@@ -255,7 +286,7 @@
       "main": [
         [
           {
-            "node": "Send Email — PLACEHOLDER",
+            "node": "Send Email \u2014 PLACEHOLDER",
             "type": "main",
             "index": 0
           }
@@ -283,7 +314,7 @@
         ]
       ]
     },
-    "Send Email — PLACEHOLDER": {
+    "Send Email \u2014 PLACEHOLDER": {
       "main": [
         [
           {
@@ -343,6 +374,17 @@
         [
           {
             "node": "Release Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sender Credentials": {
+      "main": [
+        [
+          {
+            "node": "Route By Channel",
             "type": "main",
             "index": 0
           }

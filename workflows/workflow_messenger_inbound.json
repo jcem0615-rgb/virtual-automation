@@ -1,5 +1,5 @@
 {
-  "name": "Messenger → CRM Draft → Approval",
+  "name": "Messenger \u2192 CRM Draft \u2192 Approval",
   "active": false,
   "settings": {
     "executionOrder": "v1"
@@ -109,7 +109,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Verify Meta's signature, then pull out the one thing we care about:\n// who wrote, and what they said. Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto,\n// which docker-compose.yml sets for the n8n service.\nconst crypto = require('crypto');\n\nconst raw = $input.item.binary?.data\n  ? Buffer.from($input.item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify($input.item.json.body ?? {});\nconst signature = $input.item.json.headers?.['x-hub-signature-256'] ?? '';\nconst secret = $env.META_APP_SECRET;\n\nif (secret) {\n  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(signature);\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    throw new Error('bad X-Hub-Signature-256 — dropping this delivery');\n  }\n}\n\nconst body = typeof raw === 'string' ? JSON.parse(raw) : raw;\nconst entry = body.entry?.[0] ?? {};\nconst event = entry.messaging?.[0] ?? {};\n\n// Echoes of our own sends, and read receipts, are not customer messages.\nconst text = event.message?.text;\nconst isEcho = event.message?.is_echo === true;\n\nreturn { json: {\n  skip: !text || isEcho,\n  psid: event.sender?.id ?? null,\n  page_id: entry.id ?? null,\n  message: text ?? '',\n  business_code: $env.META_BUSINESS_CODE || 'BIZ_ELEC',\n} };"
+        "jsCode": "// Verify Meta's signature, then pull out the one thing we care about:\n// who wrote, and what they said. Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto,\n// which docker-compose.yml sets for the n8n service.\nconst crypto = require('crypto');\n\nconst raw = $input.item.binary?.data\n  ? Buffer.from($input.item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify($input.item.json.body ?? {});\nconst signature = $input.item.json.headers?.['x-hub-signature-256'] ?? '';\nconst secret = $env.META_APP_SECRET;\n\nif (secret) {\n  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(signature);\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    throw new Error('bad X-Hub-Signature-256 \u2014 dropping this delivery');\n  }\n}\n\nconst body = typeof raw === 'string' ? JSON.parse(raw) : raw;\nconst entry = body.entry?.[0] ?? {};\nconst event = entry.messaging?.[0] ?? {};\n\n// Echoes of our own sends, and read receipts, are not customer messages.\nconst text = event.message?.text;\nconst isEcho = event.message?.is_echo === true;\n\nreturn { json: {\n  skip: !text || isEcho,\n  psid: event.sender?.id ?? null,\n  page_id: entry.id ?? null,\n  message: text ?? '',\n  business_code: $env.META_BUSINESS_CODE || 'BIZ_ELEC',\n} };"
       },
       "id": "c1000000-0000-4000-8000-000000000006",
       "name": "Verify & Extract",
@@ -119,6 +119,44 @@
         -540,
         400
       ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts?kinds=chat",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "d7000000-0000-4000-8000-0000000000c1",
+      "name": "Connected Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Which floor this page belongs to, and which connected account it is.\n// Meta's delivery names the page it arrived on, so the page answers both\n// questions \u2014 and the reply goes back out on that page's own token,\n// rather than on whichever single token the deployment was given.\n//\n// META_BUSINESS_CODE is still the fallback for a page nobody has\n// connected yet, which is how this worked before: one page, one floor.\nconst message = $('Verify & Extract').item.json;\nconst accounts = $input.first().json.accounts ?? [];\nconst page = accounts.find((a) => a.external_id\n  && String(a.external_id) === String(message.page_id)\n  && ['facebook', 'instagram'].includes(a.platform));\n\nreturn [{ json: {\n  ...message,\n  account_id: page?.id ?? null,\n  account_label: page?.label ?? null,\n  business_code: page?.business_code ?? message.business_code,\n} }];\n"
+      },
+      "id": "d7000000-0000-4000-8000-0000000000c2",
+      "name": "Whose Page Is It?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        300
+      ],
+      "notes": "Routing several pages to several businesses, instead of the one META_BUSINESS_CODE names."
     },
     {
       "parameters": {
@@ -184,7 +222,7 @@
         -100,
         340
       ],
-      "notes": "423 means a human paused the CRM desk — the conversation is left alone."
+      "notes": "423 means a human paused the CRM desk \u2014 the conversation is left alone."
     },
     {
       "parameters": {
@@ -257,7 +295,7 @@
         "url": "={{ $env.BACKEND_URL }}/api/internal/approvals",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ agent_id: $('Build Prompt').item.json.agent_id, payload: { type: 'messenger_reply', title: 'Messenger reply to ' + $('Build Prompt').item.json.lead.psid, draft: ($json.response || '').trim(), channel: 'meta_dm', recipient: $('Build Prompt').item.json.lead.psid, source: $('Build Prompt').item.json.lead } }) }}",
+        "jsonBody": "={{ JSON.stringify({ agent_id: $('Build Prompt').item.json.agent_id, payload: { type: 'messenger_reply', title: 'Messenger reply to ' + $('Build Prompt').item.json.lead.psid, draft: ($json.response || '').trim(), channel: 'meta_dm', recipient: $('Build Prompt').item.json.lead.psid, account_id: $('Whose Page Is It?').item.json.account_id, account_label: $('Whose Page Is It?').item.json.account_label, source: $('Build Prompt').item.json.lead } }) }}",
         "options": {},
         "sendHeaders": true,
         "headerParameters": {
@@ -341,7 +379,7 @@
       "main": [
         [
           {
-            "node": "A Real Message?",
+            "node": "Connected Pages",
             "type": "main",
             "index": 0
           }
@@ -422,6 +460,28 @@
         [
           {
             "node": "Ack Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Connected Pages": {
+      "main": [
+        [
+          {
+            "node": "Whose Page Is It?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Whose Page Is It?": {
+      "main": [
+        [
+          {
+            "node": "A Real Message?",
             "type": "main",
             "index": 0
           }

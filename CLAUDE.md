@@ -110,6 +110,22 @@ the realtime path depends on triggers.
   `users (is_platform_owner) WHERE is_platform_owner` enforces it, `create-user.js`
   refuses a second with the current one's name, and `transfer-owner.js` moves it in one
   transaction. Do not add a way to make more.
+- **A post copy belongs to an account, not to a platform.** `social_post_targets` is keyed
+  `(post_id, account_id)` for the same reason `product_listings` is keyed by account: a
+  business can hold two Facebook pages or two Shopee shops, and a post on one is not a post
+  on the other. `accountsFor()` resolves what a request means — `account_ids` outright, or
+  a list of platforms while the business has one account on each, refused by name when it
+  has two. The approval carries `targets: [{account_id, platform, label}]`, and that is
+  what decides whose page a copy lands on.
+- **Every sender reads the credentials of the account it is sending as.** All four outbound
+  workflows fetch them from `/api/internal/accounts/:id/credentials` — the chat and product
+  syncs always did; `workflow_post_sync.json` and `workflow_approval_dispatch.json` used to
+  read `$env` instead, which meant one deployment-wide shop and one deployment-wide page
+  for every business on it. A message answered as the wrong seller is a tenancy leak with
+  a customer on the other end of it, so no workflow may take a marketplace credential from
+  the environment again. `workflow_messenger_inbound.json` resolves the page the delivery
+  arrived on against the connected accounts, which is also how several pages reach several
+  businesses; `META_BUSINESS_CODE` is only the fallback for a page nobody has connected.
 - **A post reaching a platform is outbound work, so it goes through the gate.** Neither
   `PATCH /api/posts/:id` nor `POST /api/posts/:id/publish` touches a platform. An edit to
   a live post files a `post_update` approval and marks those targets `UPDATE_PENDING`; a
@@ -312,8 +328,6 @@ the realtime path depends on triggers.
 - The service worker caches the shell only. The dashboard needs the network, so opening
   the installed app offline gets the chrome and a failed session check, not a usable
   queue. Offline review would need the approvals cached, which is a product decision.
-- The Messenger workflow answers one page, chosen by `META_BUSINESS_CODE`. Routing several
-  pages to several businesses needs a page-id lookup rather than an env var.
 - No password reset for the user: `scripts/reset-password.js` is the only route, and there
   is no email sending anywhere in the stack.
 - The sign-in throttle lives in one backend process's memory. Run more than one instance
@@ -341,14 +355,6 @@ the realtime path depends on triggers.
 - `workflow_approval_dispatch.json` has real Meta and Shopee senders; the email branch is
   still a placeholder node, and a channel it does not route falls through to a no-op. An
   inbox reply does not come here at all — it goes to `N8N_CHAT_WEBHOOK_URL`.
-- **`workflow_post_sync.json` and `workflow_approval_dispatch.json` still read marketplace
-  credentials from `$env`,** where `workflow_marketplace_chat.json` and
-  `workflow_product_sync.json` read them per connected account from
-  `/api/internal/accounts/:id/credentials`. So a post or a dispatched reply goes out on
-  whichever single account the environment names, not the shop the business connected —
-  wrong the moment a second business or a second shop exists. The chat path is fixable the
-  same way products were; posts need `social_post_targets` to carry an account first,
-  because it is per platform today and a business can hold two shops on one marketplace.
 - Nothing imports the workflows into n8n. `docker-compose.yml` mounts `./workflows` at
   `/workflows` and the README gives the one-line import, but a fresh stack has an empty
   n8n until somebody runs it — and an imported workflow still has to be activated by hand.

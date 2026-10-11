@@ -34,16 +34,24 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
   const [posts, setPosts] = useState([]);
   const [editing, setEditing] = useState(null);   // post id
   const [draft, setDraft] = useState('');
-  const [targets, setTargets] = useState([]);
+  const [accounts, setAccounts] = useState([]);   // connected, to pick from
+  const [targets, setTargets] = useState([]);     // account ids this post goes to
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [note, setNote] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const result = await api.posts(businessId, platform);
+      const [result, connected] = await Promise.all([
+        api.posts(businessId, platform),
+        api.accounts(businessId),
+      ]);
       setPlatforms(result.platforms);
       setPosts(result.posts);
+      // A post goes out on a page or a shop, not on a platform in the
+      // abstract — the same reason a listing does — so these are what the
+      // editor offers.
+      setAccounts(connected.accounts ?? []);
       setError(null);
     } catch (err) {
       if (err instanceof Unauthorized) return onSignedOut();
@@ -56,7 +64,7 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
   const startEdit = (post) => {
     setEditing(post.id);
     setDraft(post.body);
-    setTargets(post.targets.map((t) => t.platform));
+    setTargets(post.targets.map((t) => t.account_id));
     setNote(null);
     setError(null);
   };
@@ -65,7 +73,7 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
     setBusy(true);
     setError(null);
     try {
-      const result = await api.editPost(post.id, { body: draft, platforms: targets });
+      const result = await api.editPost(post.id, { body: draft, account_ids: targets });
       setEditing(null);
       setNote(result.needs_approval
         ? 'Saved. The update is waiting for approval before it reaches the platforms.'
@@ -86,7 +94,8 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
     setError(null);
     try {
       const result = await api.publishPost(post.id);
-      setNote(`Queued for ${result.platforms.join(', ')}. It goes out once approved.`);
+      setNote(`Queued for ${(result.accounts ?? []).map((a) => a.label).join(', ')}.`
+        + ' It goes out once approved.');
       await load();
     } catch (err) {
       if (err instanceof Unauthorized) return onSignedOut();
@@ -96,10 +105,10 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
     }
   };
 
-  const toggleTarget = (name) => {
-    setTargets((current) => (current.includes(name)
-      ? current.filter((p) => p !== name)
-      : [...current, name]));
+  const toggleTarget = (id) => {
+    setTargets((current) => (current.includes(id)
+      ? current.filter((a) => a !== id)
+      : [...current, id]));
   };
 
   return (
@@ -144,11 +153,19 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
                   <div className="mt-1.5 flex flex-wrap gap-1">
                     {post.targets.map((t) => (
                       <span
-                        key={t.platform}
-                        title={t.last_error ?? t.state.toLowerCase().replace('_', ' ')}
+                        key={t.account_id}
+                        title={t.last_error ?? `${PLATFORM_LABEL[t.platform] ?? t.platform}`
+                          + ` · ${t.state.toLowerCase().replaceAll('_', ' ')}`}
                         className={`rounded-full border px-2 py-0.5 font-mono text-[10px] ${STATE_STYLE[t.state]}`}
                       >
-                        {PLATFORM_LABEL[t.platform] ?? t.platform}
+                        {t.label ?? PLATFORM_LABEL[t.platform] ?? t.platform}
+                        {/* The platform too: "Elecfix page" on its own does not
+                            say where the copy went. */}
+                        {t.label && (
+                          <span className="ml-1 opacity-60">
+                            {PLATFORM_LABEL[t.platform] ?? t.platform}
+                          </span>
+                        )}
                         {STATE_SUFFIX[t.state] ?? ''}
                       </span>
                     ))}
@@ -187,20 +204,29 @@ export default function PostsPanel({ businessId, onSignedOut, refreshKey }) {
                   <div>
                     <p className="text-xs text-slate-400">Put it on:</p>
                     <div className="mt-1.5 flex flex-wrap gap-1">
-                      {platforms.map((name) => (
+                      {accounts.map((account) => (
                         <button
-                          key={name}
+                          key={account.id}
                           type="button"
-                          onClick={() => toggleTarget(name)}
+                          onClick={() => toggleTarget(account.id)}
                           className={`rounded-full border px-2.5 py-1 text-[11px] ${
-                            targets.includes(name)
+                            targets.includes(account.id)
                               ? 'border-emerald-800 bg-emerald-950 text-emerald-300'
                               : 'border-slate-700 text-slate-500 hover:bg-slate-800'
                           }`}
                         >
-                          {PLATFORM_LABEL[name] ?? name}
+                          {account.label}
+                          <span className="ml-1 text-slate-500">
+                            {PLATFORM_LABEL[account.platform] ?? account.platform}
+                          </span>
                         </button>
                       ))}
+                      {accounts.length === 0 && (
+                        <span className="text-[11px] text-slate-500">
+                          No accounts connected yet — a post needs a page or a shop
+                          to go out on.
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
