@@ -144,6 +144,43 @@ const FLOOR_THEMES = {
   },
 };
 
+// A clinic reads wrong in anybody else's colours: pale floor, cool light,
+// nothing wooden. The one trade distinct enough to be worth its own room.
+FLOOR_THEMES.clinic = {
+  floor: 0xdfe6e9, floorAlt: 0xd4dde1, floorSeam: 0xa9b6bc,
+  wall: 0xeef2f4, wallDark: 0xcdd6da, frame: 0x8e9ba3,
+  sky: 0xbcd9e8, skyFar: 0x96bdd4, accent: 0x0ea5a5,
+  desk: 0xe8edef, deskDark: 0xc3ccd1, screen: 0x14b8a6,
+  rug: 0xcfdadf, rugAlt: 0xdde5e9, labelInk: '#5a6b72',
+  feature: 'shelving',
+};
+
+// The rest of the trades borrow the room that fits them closest. Every line
+// in `business-lines.js` has to land on a floor — fall through to `general`
+// and a dental clinic gets a plain office with nothing in it that says what
+// the business does.
+Object.assign(FLOOR_THEMES, {
+  hardware: FLOOR_THEMES.construction,
+  manufacturing: FLOOR_THEMES.construction,
+  repair: FLOOR_THEMES.electrical,
+  automotive: FLOOR_THEMES.electrical,
+  water: FLOOR_THEMES.food,
+  agriculture: FLOOR_THEMES.food,
+  pharmacy: FLOOR_THEMES.retail,
+  rental: FLOOR_THEMES.logistics,
+  printing: FLOOR_THEMES.it_services,
+  photography: FLOOR_THEMES.it_services,
+  laundry: FLOOR_THEMES.salon,
+  cleaning: FLOOR_THEMES.salon,
+  fitness: FLOOR_THEMES.salon,
+  pet: FLOOR_THEMES.salon,
+  education: FLOOR_THEMES.professional_services,
+  real_estate: FLOOR_THEMES.professional_services,
+  travel: FLOOR_THEMES.professional_services,
+  events: FLOOR_THEMES.professional_services,
+  security_services: FLOOR_THEMES.professional_services,
+});
+
 // The wall runs along the top; everything below it is floor.
 const WALL_H = 118;
 

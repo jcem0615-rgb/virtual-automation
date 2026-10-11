@@ -253,11 +253,17 @@ BEGIN
         desk_y            = EXCLUDED.desk_y;
   GET DIAGNOSTICS inserted = ROW_COUNT;
 
-  -- Every desk starts with its department's whole skill set switched on.
+  -- Every desk starts with the skills that fit this trade switched on: the
+  -- ones every business needs, plus the ones this line of work needs. A skill
+  -- for another trade is not switched off, it is simply never offered —
+  -- `skillsFor()` in the API lists the same set, so the dashboard shows a
+  -- desk exactly what it has.
   INSERT INTO agent_skills (agent_id, skill_key)
   SELECT a.id, c.skill_key
     FROM agents a
+    JOIN businesses b ON b.id = a.business_id
     JOIN skill_catalogue c ON c.department = a.department
+     AND (c.business_types IS NULL OR b.business_type = ANY (c.business_types))
    WHERE a.business_id = p_business_id AND a.removed_at IS NULL
   ON CONFLICT (agent_id, skill_key) DO NOTHING;
 
@@ -310,9 +316,16 @@ CREATE TABLE IF NOT EXISTS skill_catalogue (
   skill_key  text NOT NULL,
   name       text NOT NULL,
   summary    text NOT NULL,
+  -- Which trades this skill belongs to. NULL is the common case: most of
+  -- what a desk does is the same whatever the business sells. A list means
+  -- the skill only makes sense for those lines — a salon's chair schedule is
+  -- not a haulier's, and a construction bid is not a drugstore's.
+  business_types text[],
   sort       int  NOT NULL DEFAULT 0,
   PRIMARY KEY (department, skill_key)
 );
+
+ALTER TABLE skill_catalogue ADD COLUMN IF NOT EXISTS business_types text[];
 
 CREATE TABLE IF NOT EXISTS agent_skills (
   agent_id   uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -325,6 +338,8 @@ CREATE TABLE IF NOT EXISTS agent_skills (
 CREATE INDEX IF NOT EXISTS agent_skills_enabled_idx
   ON agent_skills (agent_id) WHERE enabled;
 
+-- The skills every desk has whatever the business sells. `business_types` is
+-- left null on all of them, which is what makes them universal.
 INSERT INTO skill_catalogue (department, skill_key, name, summary, sort) VALUES
   -- Sales
   ('Sales','lead_qualification','Lead qualification','Reads an enquiry and works out budget, urgency and whether it is worth quoting.',1),
@@ -388,6 +403,103 @@ INSERT INTO skill_catalogue (department, skill_key, name, summary, sort) VALUES
   ('Payments','live_checkout','Live checkout links','Issues the checkout link for a live-stream claim and watches whether it gets paid before the hold runs out.',8)
 ON CONFLICT (department, skill_key) DO UPDATE
   SET name = EXCLUDED.name, summary = EXCLUDED.summary, sort = EXCLUDED.sort;
+
+-- What a desk knows because of the trade it is in. A floor only ever gets
+-- the ones whose `business_types` name it, so a salon's Sales desk is asked
+-- about chairs and no-shows and a haulier's is asked about lanes and
+-- backloads — the same desk, a different job. Adding a trade skill is a row
+-- here, not a code change.
+INSERT INTO skill_catalogue (department, skill_key, name, summary, business_types, sort) VALUES
+  -- Booking a slot, where the slot is the product.
+  ('Sales','slot_booking','Slot booking',
+   'Offers the times that are actually free, holds one, and says what happens if they are late.',
+   ARRAY['salon','clinic','automotive','fitness','photography','events','education','pet','travel'],10),
+  ('CRM','no_show_recovery','No-show and rebooking',
+   'Follows up a missed appointment once, offers the next slot, and stops there.',
+   ARRAY['salon','clinic','automotive','fitness','photography','education','pet'],10),
+  ('Production','capacity_planning','Chair and bay capacity',
+   'Keeps the day sequenced so a slot is never sold twice and a gap is offered before it is wasted.',
+   ARRAY['salon','clinic','automotive','fitness','laundry','repair','printing'],10),
+  ('CRM','recall_reminders','Recalls and check-ups',
+   'Reminds a customer that the next visit is due, at the interval the work calls for.',
+   ARRAY['clinic','automotive','pet','fitness'],11),
+
+  -- Quoting work that has to be surveyed before it can be priced.
+  ('Sales','site_survey','Site survey and takeoff',
+   'Turns what was measured on site into a priced scope, with the assumptions written down.',
+   ARRAY['electrical','construction','cleaning','printing','events','manufacturing'],11),
+  ('Sales','tender_bidding','Tender and bid response',
+   'Reads an invitation to bid and drafts the submission against what it actually asks for.',
+   ARRAY['construction','it_services','cleaning','security_services','professional_services'],12),
+  ('Production','variation_orders','Variation orders',
+   'Prices a change the client asked for mid-job, so it is agreed before it is built.',
+   ARRAY['construction','electrical','it_services','manufacturing','events'],11),
+  ('Admin','permits_compliance','Permits and compliance papers',
+   'Tracks which permit, clearance or licence is due, and what lapses without it.',
+   ARRAY['construction','food','pharmacy','clinic','water','security_services','travel'],10),
+
+  -- Stock that is perishable, serialised, or legally controlled.
+  ('Inventory','expiry_tracking','Expiry and batch tracking',
+   'Watches shelf life by batch, flags what to move first, and what can no longer be sold.',
+   ARRAY['pharmacy','food','clinic','agriculture','pet','water'],10),
+  ('Inventory','serial_tracking','Serial and asset tracking',
+   'Follows a unit by its serial number, so what went out is what comes back.',
+   ARRAY['it_services','rental','automotive','repair','photography','manufacturing'],11),
+  ('Inventory','consumption_rates','Consumption and reorder',
+   'Works out how fast a supply is used and when to reorder so it never runs out mid-job.',
+   ARRAY['salon','clinic','laundry','cleaning','printing','food','water'],12),
+  ('Security','controlled_items','Controlled and regulated items',
+   'Knows what may not be sold without a prescription, a licence or an age check, and refuses it.',
+   ARRAY['pharmacy','clinic','agriculture'],10),
+
+  -- Work that leaves the shop and has to come back.
+  ('Logistics','route_planning','Route and round planning',
+   'Sequences a day of drops into a route that works, and says what will not fit.',
+   ARRAY['logistics','water','food','laundry','pharmacy','hardware','agriculture'],10),
+  ('Logistics','crew_deployment','Crew deployment',
+   'Puts the right crew at the right site with the right kit, and covers the gap when one calls in.',
+   ARRAY['electrical','construction','cleaning','security_services','events','it_services'],11),
+  ('Production','job_intake','Intake and claim stubs',
+   'Records what came in, what condition it was in, and what the customer was promised.',
+   ARRAY['repair','automotive','laundry','printing','photography'],12),
+  ('CRM','job_status_updates','Job status updates',
+   'Tells a customer where their job stands before they have to ask twice.',
+   ARRAY['repair','automotive','laundry','printing','construction','photography'],12),
+
+  -- Money that arrives in instalments, deposits or on terms.
+  ('Payments','deposits_balances','Deposits and balances',
+   'Tracks the deposit that holds a date and the balance that falls due before it.',
+   ARRAY['events','photography','travel','construction','rental','printing'],10),
+  ('Payments','recurring_dues','Recurring dues and memberships',
+   'Watches what renews, what lapsed, and who to remind before it does.',
+   ARRAY['fitness','education','it_services','real_estate','security_services','cleaning'],11),
+  ('Payments','trade_credit','Trade credit terms',
+   'Keeps a trade account inside its limit and its terms, and says when to stop supplying.',
+   ARRAY['hardware','construction','agriculture','manufacturing','logistics'],12),
+
+  -- People, where the roster is the business.
+  ('HR','shift_rostering','Shift and duty rostering',
+   'Builds a roster that covers every post and every shift, and finds the replacement when one drops.',
+   ARRAY['security_services','cleaning','food','fitness','manufacturing','clinic','salon'],10),
+  ('HR','certification_watch','Certification and licence watch',
+   'Tracks which staff certificate expires when, so nobody works a post they are no longer cleared for.',
+   ARRAY['security_services','construction','electrical','clinic','pharmacy','food','travel'],11),
+
+  -- Records that are somebody else's business, not yours.
+  ('Security','records_privacy','Patient and client confidentiality',
+   'Knows what may never be put in a message, a post or a reply, however the question is asked.',
+   ARRAY['clinic','pharmacy','education','professional_services','real_estate'],11),
+
+  -- Selling a place rather than a thing.
+  ('Marketing','listing_promotion','Listing promotion',
+   'Writes a listing that sells the place, with the details a buyer asks for anyway.',
+   ARRAY['real_estate','travel','rental','events'],10),
+  ('Production','tenancy_admin','Tenancy and contract admin',
+   'Follows a contract through its dates: start, renewal, notice, and what is owed at each.',
+   ARRAY['real_estate','rental','security_services','cleaning','it_services'],13)
+ON CONFLICT (department, skill_key) DO UPDATE
+  SET name = EXCLUDED.name, summary = EXCLUDED.summary,
+      business_types = EXCLUDED.business_types, sort = EXCLUDED.sort;
 
 -- ------------------------------------------------- social posts and sync
 -- A post the business puts out, and where it has been put. The app is the

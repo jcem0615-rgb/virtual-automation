@@ -71,6 +71,18 @@ Meta credentials are per connected account and come from the backend at run
 time; the `$env` ones in `docker-compose.yml` are for the two workflows that
 have not been moved over yet (see **Known gaps**).
 
+## Checking it before you trust it
+
+```bash
+docker compose exec backend node scripts/preflight.js
+```
+
+Reads the configuration and the database and says what would stop a real seller
+getting a real message out: an unset key, the development token, a redirect a
+marketplace will refuse, a shop whose credentials will not decrypt, a webhook
+nobody set, workflows imported but never activated. It changes nothing and
+exits non-zero when something would genuinely break.
+
 ## Deploying it online
 
 ```bash

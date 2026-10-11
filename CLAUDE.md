@@ -19,7 +19,7 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `backend/uploads.js` | Product photos off the device, and the folder they are served from. |
 | `backend/live.js` | Live selling: the basket, the monitor, the claims. |
 | `backend/business-lines.js` | The trades a floor can be opened for. |
-| `backend/scripts/` | `create-user.js`, `reset-password.js`. There is no sign-up page. |
+| `backend/scripts/` | `create-user.js`, `reset-password.js`, `transfer-owner.js`, `preflight.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
 | `frontend/src/components/PostsPanel.jsx` | Social posts, per-platform filter, editing. |
@@ -264,6 +264,16 @@ the realtime path depends on triggers.
   HR, Security`. `provision_business_agents()` is the only place the layout is decided, and
   `business-lines.js` renames them for the trade — the departments never change, so every
   rule, workflow and filter that keys off one still works.
+- **Any trade can open a floor, and its desks know that trade.** `BUSINESS_LINES` carries
+  29 of them and `general` for the rest; each renames the desks for the work. What a desk
+  *knows* comes from `skill_catalogue.business_types`: null means every business needs it
+  (47 of them), a list means only those trades get it (24 more). `provision_business_agents()`
+  and `POST /api/agents` both apply that filter, so a desk put back on the floor is the
+  desk that left rather than a generic one, and a salon is never offered a builder's job.
+  Adding a trade skill is a row, not a code change. Every key in `BUSINESS_LINES` must
+  also have a floor in `FLOOR_THEMES` — most borrow the room that fits them closest, and
+  falling through to `general` would give a dental clinic a plain office with nothing in
+  it that says what the business does.
 - The canvas draws **one** office. Every floor uses the same desk coordinates, so drawing
   two at once stands one business's staff inside another's; `App.jsx` scopes the agents and
   passes the business as `floor`, and `FLOOR_THEMES` picks the boards, walls, accent and
@@ -319,6 +329,15 @@ the realtime path depends on triggers.
   changes. Phaser runs with `expandParent: false`, or it widens its host div and pushes
   the page sideways on a phone.
 - Currency is PHP; timezone defaults to `Asia/Manila`.
+
+## Before a deployment is used for real
+
+`node scripts/preflight.js` reads the configuration and the database and prints what
+would stop a real seller getting a real message out — an unset `CREDENTIALS_KEY`, the
+development `INTERNAL_TOKEN`, a connect redirect that is not https, an account whose keys
+will not decrypt, a webhook nobody set, workflows imported but never activated. It changes
+nothing and exits non-zero when something would genuinely break. Run it after every
+deployment change; it is faster than finding out from a customer.
 
 ## Known gaps (good next tasks)
 

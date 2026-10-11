@@ -14,6 +14,7 @@ export default function NewOfficeDialog({ onClose, onOpened }) {
   const [lines, setLines] = useState([]);
   const [name, setName] = useState('');
   const [line, setLine] = useState('retail');
+  const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -41,13 +42,26 @@ export default function NewOfficeDialog({ onClose, onOpened }) {
 
   const chosen = lines.find((l) => l.key === line);
 
+  // Twenty-nine trades is more than anyone reads top to bottom, so they can
+  // be narrowed by typing. "Something else" is always offered: it is the
+  // answer when none of the others fit, and a filter that hid it would leave
+  // somebody with nothing to pick.
+  const needle = search.trim().toLowerCase();
+  const shown = needle
+    ? lines.filter((l) => l.key === 'general'
+        || `${l.label} ${l.blurb}`.toLowerCase().includes(needle))
+    : lines;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 p-4 sm:items-center"
       onClick={onClose}
     >
+      {/* Capped and scrolling inside: with every trade listed the box is
+          taller than a laptop screen, and "Open it" ends up below the fold
+          where it cannot be reached. */}
       <div
-        className="w-full max-w-lg rounded-xl border border-slate-800 bg-slate-900 p-5"
+        className="flex max-h-[88vh] w-full max-w-lg flex-col overflow-y-auto rounded-xl border border-slate-800 bg-slate-900 p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-base font-semibold text-slate-100">Open another office</h2>
@@ -70,9 +84,18 @@ export default function NewOfficeDialog({ onClose, onOpened }) {
           </label>
 
           <div className="block text-sm">
-            <span className="text-slate-400">What line of business?</span>
-            <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
-              {lines.map((l) => (
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <span className="text-slate-400">What line of business?</span>
+              <input
+                id="office-line-search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search trades"
+                className="w-36 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100 outline-none focus:border-sky-500"
+              />
+            </div>
+            <div className="mt-1.5 grid max-h-64 gap-1.5 overflow-y-auto pr-1 sm:grid-cols-2">
+              {shown.map((l) => (
                 <button
                   key={l.key}
                   type="button"

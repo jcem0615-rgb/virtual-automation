@@ -604,12 +604,17 @@ app.post('/api/agents', wrap(async (req, res) => {
       [businessId, desk.department, desk.department + ' Agent', desk.role_title,
        desk.sprite, desk.desk_x, desk.desk_y]);
     const agent = rows[0];
-    // Its skills come back with it; a brand new desk gets the whole set.
+    // Its skills come back with it; a brand new desk gets the set that fits
+    // this trade — the same one `provision_business_agents()` hands out, so a
+    // desk put back is the desk that left rather than a generic one.
     await client.query(
       `INSERT INTO agent_skills (agent_id, skill_key)
-       SELECT $1, c.skill_key FROM skill_catalogue c WHERE c.department = $2
+       SELECT $1, c.skill_key
+         FROM skill_catalogue c, businesses b
+        WHERE c.department = $2 AND b.id = $3
+          AND (c.business_types IS NULL OR b.business_type = ANY (c.business_types))
        ON CONFLICT (agent_id, skill_key) DO NOTHING`,
-      [agent.id, desk.department]);
+      [agent.id, desk.department, businessId]);
     await logAction(client, {
       businessId,
       agentId: agent.id,
