@@ -181,6 +181,14 @@ INSERT rather than a code change.
 The app is where a post is written and edited; the platforms hold copies. Each post
 shows the platforms it is on and the state of each copy.
 
+- **Writing one** — **Write a post** in the Market tab: a title, the text, a photo off
+  your phone, and which of your pages or accounts it is for. That saves a **draft**. A
+  draft reaches nobody; sending it is a separate click.
+- **Letting the Marketing desk write it** — in the same composer, pick a product (and
+  anything you want mentioned) and press **Ask Marketing**. The desk is claimed, the
+  prompt is built from the skills that desk has switched on, your local model writes the
+  caption, and it lands in the approval queue with the product's photo on it. Nothing
+  reaches a page until you approve it. It also runs itself at 09:00, one promo per floor.
 - **Syncing in** — n8n posts to `/api/internal/posts` with the platform and that
   platform's own id. Re-syncing the same post updates the copy here instead of
   duplicating it.
@@ -192,7 +200,9 @@ shows the platforms it is on and the state of each copy.
 - **Approving** sends it. `workflow_post_sync.json` publishes or edits each copy
   depending on whether that platform already holds one, and reports back per platform, so
   the dashboard shows exactly which copies went out and which did not, with the reason.
-- **Rejecting** discards the edit; the live copies are never touched.
+- **Rejecting** discards the edit; the live copies are never touched. Rejecting a promo
+  the Marketing desk wrote is different: that is feedback on the caption, so the brief
+  goes back to the desk with what you said and it rewrites the same post.
 
 The list has a **filter per platform**, so you can work on one channel at a time instead
 of scrolling a mixed feed.
@@ -201,15 +211,21 @@ of scrolling a mixed feed.
 
 | | Publish a new post | Edit a live post |
 | --- | --- | --- |
-| **Facebook** | ✅ `POST /{page-id}/feed` | ✅ `POST /{post-id}` |
+| **Facebook** | ✅ `/{page-id}/photos` with a picture, `/{page-id}/feed` without | ✅ `POST /{post-id}` |
 | **Shopee** | ❌ a listing needs a category, attributes and logistics — create it in Seller Centre | ✅ `product/update_item` |
 | **TikTok** | ✅ Content Posting API, needs an image or video | ❌ no edit endpoint exists |
-| **Instagram** | ❌ not wired | ❌ captions cannot be edited through the API |
+| **Instagram** | ✅ `/{ig-id}/media` then `/media_publish`, needs an image | ❌ captions cannot be edited through the API |
 | **Lazada / X** | ❌ not wired | ❌ not wired |
 
 Where a platform cannot do something, the workflow marks that copy **failed with the
 reason** instead of skipping it quietly — so the dashboard never shows a post as sent
 when it was not.
+
+**Set `PUBLIC_URL`.** Every one of these platforms fetches the picture over HTTP from
+its own servers while it builds the post or the listing, so an uploaded photo has to be
+on an address they can reach. With `PUBLIC_URL` set, `POST /api/uploads` hands back
+`https://your-host/uploads/…`; without it the photo is only a path on your machine, the
+senders refuse the copy and say so, and `preflight.js` stops.
 
 **Shopee** needs `SHOPEE_PARTNER_ID`, `SHOPEE_PARTNER_KEY`, `SHOPEE_SHOP_ID` and
 `SHOPEE_ACCESS_TOKEN` from the Open Platform console. Every call is signed
@@ -428,6 +444,6 @@ the realtime path runs on triggers, so mocks prove nothing.
 | `frontend/src/components/AccountsPanel.jsx` | Connected seller accounts. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene: the floor, and the staff who walk it. |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
-| `workflows/*.json` | n8n exports (sales lead, Messenger inbound, dispatch). |
+| `workflows/*.json` | n8n exports: sales lead, Messenger inbound, dispatch, post sync, product sync, marketplace chat, order sync, live monitor, marketing. |
 | `docker-compose.yml` | postgres, ollama, n8n, backend, frontend on one network. |
 | `docker-compose.prod.yml` | Overlay that publishes only the dashboard. |

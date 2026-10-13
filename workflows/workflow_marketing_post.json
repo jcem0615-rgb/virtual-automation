@@ -1,0 +1,613 @@
+{
+  "name": "Marketing \u2014 write a promo",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "marketing-post",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "ask",
+      "name": "Asked For A Promo",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -900,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "morning",
+      "name": "Every Morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -900,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/businesses",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "open-floors",
+      "name": "Open Floors",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -680,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The morning round: one promo per floor that is open. No product named, so\n// the desk picks something itself, and nothing is sent \u2014 a draft lands in the\n// approval queue for whoever opens the dashboard.\nreturn ($input.first().json.businesses ?? []).map((b) => ({ json: {\n  business_id: b.id,\n  business_code: b.code,\n  business_name: b.name,\n  business_type: b.business_type,\n  product_id: null,\n  brief: null,\n  account_ids: null,\n  post_id: null,\n  feedback: null,\n  previous_draft: null,\n  asked_by: 'the morning round',\n} }));\n"
+      },
+      "id": "one-job-per-floor",
+      "name": "One Job Per Floor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Both ways in end up here in the same shape: the morning round, and someone\n// asking for a promo in the dashboard. A webhook item carries the request\n// under `body`; an item from the round is already a job.\nconst body = $json.body ?? null;\nif (!body) return { json: $json };\nreturn { json: {\n  business_id: body.business_id ?? null,\n  business_code: body.business_code ?? null,\n  business_name: body.business_name ?? null,\n  business_type: body.business_type ?? null,\n  product_id: body.product_id ?? null,\n  brief: body.brief ?? null,\n  account_ids: body.account_ids ?? null,\n  // A rewrite after a turned-down caption: the same post is written again\n  // rather than a second one appearing beside the first.\n  post_id: body.post_id ?? null,\n  feedback: body.feedback ?? null,\n  previous_draft: body.previous_draft ?? null,\n  asked_by: body.requested_by ?? null,\n} };\n"
+      },
+      "id": "the-job",
+      "name": "The Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/checkout",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ business_id: $json.business_id, business_code: $json.business_code, department: 'Marketing', task: $json.feedback ? 'Rewriting a promo' : 'Writing a promo' }) }}"
+      },
+      "id": "claim-the-marketing-desk",
+      "name": "Claim The Marketing Desk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -20,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.ok === true }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "desk-free",
+      "name": "Desk Free?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/products?business_id={{ $json.agent.business_id }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "what-is-there-to-sell",
+      "name": "What Is There To Sell",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/accounts?kinds=post",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        }
+      },
+      "id": "where-can-it-go",
+      "name": "Where Can It Go",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// What to talk about, and where it would go. Both are settled before the\n// model is asked anything, so a floor with nothing to sell or nowhere to post\n// gives its desk straight back instead of spending a minute on a caption that\n// has no home.\nconst job = $('The Job').item.json;\nconst claim = $('Claim The Marketing Desk').item.json;\nconst businessId = claim.agent.business_id;\n\nconst accounts = ($('Where Can It Go').item.json.accounts ?? [])\n  .filter((a) => a.business_id === businessId && a.sync_enabled);\nconst wanted = Array.isArray(job.account_ids) && job.account_ids.length\n  ? accounts.filter((a) => job.account_ids.includes(a.id))\n  : accounts;\n\nconst mine = ($('What Is There To Sell').item.json.products ?? [])\n  .filter((p) => p.business_id === businessId);\n// Asked for one, or else something that is actually in stock \u2014 there is no\n// point promoting what cannot be sold.\nconst product = job.product_id\n  ? (mine.find((p) => p.id === job.product_id) ?? null)\n  : (mine.find((p) => Number(p.stock) > 0) ?? mine[0] ?? null);\n\nconst why = !wanted.length\n  ? 'no page or account on this floor can take a post'\n  : (!product && !job.brief ? 'nothing on this floor to promote yet' : null);\n\nreturn { json: {\n  ...job,\n  business_id: businessId,\n  business_name: claim.agent.business_name ?? job.business_name,\n  agent_id: claim.agent.id,\n  agent_name: claim.agent.name,\n  role_title: claim.agent.role_title,\n  skills: claim.skills ?? [],\n  product,\n  accounts: wanted,\n  why,\n} };\n"
+      },
+      "id": "pick-something-to-promote",
+      "name": "Pick Something To Promote",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ !$json.why }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "something-to-say",
+      "name": "Something To Say?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// The prompt is built from the skills this desk has switched on, so turning\n// one off in the dashboard changes what the model is asked to write.\nconst it = $input.item.json;\nconst p = it.product;\nconst skills = (it.skills ?? []).map((s) => `- ${s.name}: ${s.summary}`).join('\\n');\nconst where = [...new Set(it.accounts.map((a) => a.platform))].join(' and ');\nconst money = (n) => `PHP ${Number(n).toLocaleString('en-PH')}`;\n\nconst prompt = [\n  `You are ${it.agent_name}, ${it.role_title} at ${it.business_name ?? 'this business'}.`,\n  'What this desk is for:', skills || '- writing posts that sell',\n  '',\n  `Write one social post for ${where}.`,\n  '',\n  'Rules:',\n  '- Filipino-English, the way a shop owner writes to their own customers.',\n  '- Under 80 words, then up to 5 hashtags on their own last line.',\n  '- Lead with what it does for the buyer, not with the word \"promo\".',\n  '- Prices in Philippine pesos, written as PHP 1,250.',\n  '- Never invent a discount, a deadline, free delivery or stock you were not given.',\n  '- No emoji walls: three at most.',\n  '- Output only the post itself. No title, no quotes, no explanation.',\n  '',\n  p ? [`The product:`, `- Name: ${p.name}`,\n       `- Price: ${money(p.price)}`,\n       `- In stock: ${p.stock}`,\n       p.description ? `- Details: ${String(p.description).slice(0, 600)}` : '',\n      ].filter(Boolean).join('\\n') : '',\n  it.brief ? `What they asked for: ${it.brief}` : '',\n  // A turned-down caption is feedback on the writing, not on the product, so\n  // the rewrite is given both and asked to fix the one thing.\n  it.feedback ? ['', 'Your previous post was turned down by a human reviewer.',\n    `Previous post: ${it.previous_draft ?? ''}`,\n    `What they said: ${it.feedback}`,\n    'Write it again, addressing that.'].join('\\n') : '',\n].filter(Boolean).join('\\n');\n\nreturn { json: { ...it, prompt } };\n"
+      },
+      "id": "write-the-caption",
+      "name": "Write The Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.OLLAMA_URL }}/api/generate",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL || 'llama3.1', prompt: $json.prompt, stream: false }) }}"
+      },
+      "id": "ask-the-model",
+      "name": "Ask The Model",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1520,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Models like to wrap an answer in quotes or announce it first. Strip that,\n// and keep the title out of the caption: the title is for the dashboard, the\n// body is what the page actually shows.\nconst it = $('Write The Caption').item.json;\nconst raw = String($input.item.json.response ?? '').trim();\nconst body = raw\n  .replace(/^(here(?:'s| is)[^\\n:]*:|caption:|post:)\\s*/i, '')\n  .replace(/^[\"'`]+|[\"'`]+$/g, '')\n  .trim();\n\nconst p = it.product;\n// A photo the platform can fetch. An uploaded one is only a path until\n// PUBLIC_URL is set, and a path is no use to Facebook or Instagram \u2014 the\n// senders say so rather than posting a picture nobody can load.\nconst photo = (p?.images ?? []).find((u) => /^https?:\\/\\//i.test(String(u)))\n  ?? (p?.images ?? [])[0] ?? null;\n\nreturn { json: {\n  business_id: it.business_id,\n  agent_id: it.agent_id,\n  post_id: it.post_id,\n  product_id: p?.id ?? null,\n  brief: it.brief,\n  account_ids: it.accounts.map((a) => a.id),\n  title: p ? p.name : String(it.brief ?? 'Post').slice(0, 80),\n  body,\n  media_url: photo,\n  written: body.length > 20,\n} };\n"
+      },
+      "id": "read-the-caption",
+      "name": "Read The Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1740,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "a",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "leftValue": "={{ $json.written === true }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "caption-written",
+      "name": "Caption Written?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/posts/draft",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ business_id: $json.business_id, department: 'Marketing', title: $json.title, body: $json.body, media_url: $json.media_url, product_id: $json.product_id, post_id: $json.post_id, brief: $json.brief, account_ids: $json.account_ids }) }}"
+      },
+      "id": "file-the-promo",
+      "name": "File The Promo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2180,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/{{ $json.agent_id }}/release",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.why || 'Nothing to post' }) }}"
+      },
+      "id": "let-the-desk-go",
+      "name": "Let The Desk Go",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1960,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Asked For A Promo": {
+      "main": [
+        [
+          {
+            "node": "The Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Morning": {
+      "main": [
+        [
+          {
+            "node": "Open Floors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Floors": {
+      "main": [
+        [
+          {
+            "node": "One Job Per Floor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Job Per Floor": {
+      "main": [
+        [
+          {
+            "node": "The Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "The Job": {
+      "main": [
+        [
+          {
+            "node": "Claim The Marketing Desk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim The Marketing Desk": {
+      "main": [
+        [
+          {
+            "node": "Desk Free?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Desk Free?": {
+      "main": [
+        [
+          {
+            "node": "What Is There To Sell",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "What Is There To Sell": {
+      "main": [
+        [
+          {
+            "node": "Where Can It Go",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Where Can It Go": {
+      "main": [
+        [
+          {
+            "node": "Pick Something To Promote",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Something To Promote": {
+      "main": [
+        [
+          {
+            "node": "Something To Say?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Something To Say?": {
+      "main": [
+        [
+          {
+            "node": "Write The Caption",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Let The Desk Go",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write The Caption": {
+      "main": [
+        [
+          {
+            "node": "Ask The Model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask The Model": {
+      "main": [
+        [
+          {
+            "node": "Read The Caption",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read The Caption": {
+      "main": [
+        [
+          {
+            "node": "Caption Written?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Caption Written?": {
+      "main": [
+        [
+          {
+            "node": "File The Promo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Let The Desk Go",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "virtual-office"
+  }
+}

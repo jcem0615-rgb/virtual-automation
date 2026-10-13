@@ -43,6 +43,7 @@ const N8N_POST_SYNC_WEBHOOK_URL = process.env.N8N_POST_SYNC_WEBHOOK_URL ?? '';
 const N8N_PRODUCT_SYNC_WEBHOOK_URL = process.env.N8N_PRODUCT_SYNC_WEBHOOK_URL ?? '';
 const N8N_CHAT_WEBHOOK_URL = process.env.N8N_CHAT_WEBHOOK_URL ?? '';
 const N8N_LIVE_WEBHOOK_URL = process.env.N8N_LIVE_WEBHOOK_URL ?? '';
+const N8N_MARKETING_WEBHOOK_URL = process.env.N8N_MARKETING_WEBHOOK_URL ?? '';
 
 const app = express();
 
@@ -1351,6 +1352,148 @@ app.get('/api/posts/:id', wrap(async (req, res) => {
   res.json(post);
 }));
 
+// Which platforms a caption can actually be posted to. Shopee and Lazada take
+// a listing, not a post, and nothing writes to X yet — offering them here
+// would file work the sync workflow can only refuse.
+const POSTABLE = ['facebook', 'instagram', 'tiktok'];
+
+/**
+ * Write a post. This is a draft and reaches nobody: it has somewhere to go,
+ * and `POST /api/posts/:id/publish` is what files the approval that sends it.
+ * Composing is how a post comes into existence from the dashboard; the other
+ * two ways are the Marketing desk drafting one and a sync pulling one in.
+ */
+app.post('/api/posts', wrap(async (req, res) => {
+  const businessId = assertUuid(req.body?.business_id, 'business_id');
+  assertInScope(req.user, businessId);
+  const title = String(req.body?.title ?? '').trim();
+  const body = String(req.body?.body ?? '').trim();
+  if (!title) throw new HttpError(400, 'title is required');
+  if (!body) throw new HttpError(400, 'body is required');
+  const mediaUrl = req.body?.media_url ? String(req.body.media_url) : null;
+
+  const accounts = await accountsFor(businessId, req.body ?? {});
+  const wrong = accounts.filter((a) => !POSTABLE.includes(a.platform));
+  if (wrong.length) {
+    throw new HttpError(400,
+      `${wrong.map((a) => a.label).join(', ')} cannot take a post`
+      + ` — ${[...new Set(wrong.map((a) => a.platform))].join(' and ')} take a listing instead`);
+  }
+  // The post belongs to a desk, because the approval it files later sits on
+  // one. Marketing is whose job this is; deskFor falls back to a desk that
+  // is actually on the floor if Marketing has been taken off it.
+  const agentId = await deskFor(businessId, 'Marketing');
+
+  const post = await tx(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO social_posts (business_id, agent_id, title, body, media_url, status)
+       VALUES ($1, $2, $3, $4, $5, 'DRAFT') RETURNING id`,
+      [businessId, agentId, title, body, mediaUrl],
+    );
+    await syncTargets(client, rows[0].id, accounts);
+    await logAction(client, {
+      businessId,
+      agentId,
+      action: 'POST_COMPOSED',
+      actor: req.user.email,
+      actorUserId: req.user.id,
+      detail: { title, accounts: accounts.map((a) => a.label) },
+    });
+    return rows[0];
+  });
+
+  res.status(201).json({ ok: true, published: false, post: await readPost(post.id) });
+}));
+
+/**
+ * Ask the Marketing desk to write one. Nothing is drafted here — this hands
+ * the job to the marketing workflow, which checks the desk out, reads the
+ * product and the desk's enabled skills, asks the model for a caption and
+ * files it back as a draft with an approval on it. So the answer to this is
+ * "the desk is working on it", not a post.
+ */
+app.post('/api/posts/ask', wrap(async (req, res) => {
+  const businessId = assertUuid(req.body?.business_id, 'business_id');
+  assertInScope(req.user, businessId);
+  const productId = req.body?.product_id
+    ? assertUuid(req.body.product_id, 'product_id') : null;
+  const brief = req.body?.brief ? String(req.body.brief).slice(0, 1000) : null;
+  if (!productId && !brief) {
+    throw new HttpError(400, 'say which product to promote, or give a brief');
+  }
+  if (!N8N_MARKETING_WEBHOOK_URL) {
+    throw new HttpError(503,
+      'N8N_MARKETING_WEBHOOK_URL is not set, so there is no desk to send this to');
+  }
+
+  // Where it would go, settled here so the desk is not left guessing and the
+  // refusal names the shop rather than coming back from a workflow.
+  const asked = req.body?.account_ids ?? req.body?.platforms;
+  let accounts;
+  if (asked === undefined) {
+    const { rows } = await q(
+      `SELECT id, platform, label FROM platform_accounts
+        WHERE business_id = $1 AND platform = ANY($2::text[]) AND sync_enabled
+        ORDER BY platform, created_at`,
+      [businessId, POSTABLE]);
+    accounts = rows;
+    if (!accounts.length) {
+      throw new HttpError(400,
+        'connect a Facebook page, an Instagram account or a TikTok account first'
+        + ' — there is nowhere for a post to go');
+    }
+  } else {
+    accounts = await accountsFor(businessId, req.body ?? {});
+    const wrong = accounts.filter((a) => !POSTABLE.includes(a.platform));
+    if (wrong.length) {
+      throw new HttpError(400, `${wrong.map((a) => a.label).join(', ')} cannot take a post`);
+    }
+  }
+
+  const { rows: business } = await q(
+    'SELECT code, name, business_type, is_active FROM businesses WHERE id = $1', [businessId]);
+  if (!business[0]?.is_active) throw new HttpError(409, 'this business is suspended');
+
+  // A paused desk would abort the run at checkout, so say so now rather than
+  // letting the request look accepted and nothing ever arrive.
+  const { rows: desk } = await q(
+    `SELECT id, status FROM agents
+      WHERE business_id = $1 AND department = 'Marketing' AND removed_at IS NULL`,
+    [businessId]);
+  if (!desk[0]) throw new HttpError(409, 'the Marketing desk is not on this floor');
+  if (desk[0].status === 'PAUSED') {
+    throw new HttpError(409, 'the Marketing desk is paused — resume it first');
+  }
+
+  const queued = await callWebhook(N8N_MARKETING_WEBHOOK_URL, {
+    business_id: businessId,
+    business_code: business[0].code,
+    business_name: business[0].name,
+    business_type: business[0].business_type,
+    department: 'Marketing',
+    product_id: productId,
+    brief,
+    account_ids: accounts.map((a) => a.id),
+    requested_by: req.user.email,
+  }, 'marketing');
+  if (!queued.ok) {
+    throw new HttpError(502, 'the marketing workflow did not take the job'
+      + (queued.status ? ` (HTTP ${queued.status})` : ''));
+  }
+
+  await tx((client) => logAction(client, {
+    businessId,
+    agentId: desk[0].id,
+    action: 'MARKETING_DRAFT_REQUESTED',
+    actor: req.user.email,
+    actorUserId: req.user.id,
+    detail: { product_id: productId, brief, accounts: accounts.map((a) => a.label) },
+  }));
+
+  res.status(202).json({ ok: true, asked: true,
+    accounts: accounts.map((a) => ({ id: a.id, platform: a.platform, label: a.label })) });
+}));
+
 /**
  * Edit a post. This does not touch any platform — it files an approval
  * carrying the new text and the platforms it would go to. Approving it is what
@@ -2130,6 +2273,35 @@ for (const type of ['post_update', 'post_publish']) {
   });
 }
 
+/**
+ * A promo the Marketing desk wrote. It goes out through the post sync exactly
+ * like a post a person published, which is why it carries the same enriched
+ * `post` — the sync workflow cannot tell the difference and does not need to.
+ *
+ * The difference is the no. A rejected promo is not a decision against the
+ * product, it is feedback on the caption, so this is the one post kind that
+ * replays: the copies go back to not-sent, and the brief goes to the Marketing
+ * workflow with the feedback and the draft that was turned down. The desk
+ * rewrites the same post rather than leaving a second one behind it.
+ */
+registerApprovalType('post_promo', {
+  label: 'post sync',
+  webhook: () => N8N_POST_SYNC_WEBHOOK_URL,
+  enrich: async (payload) => ({ post: await readPost(payload.post_id) }),
+  onDispatchFailed: (payload, why) => postRollback(payload.post_id, why),
+  onRejected: async (payload, feedback) => {
+    await postRollback(payload.post_id, null);
+    const again = await callWebhook(N8N_MARKETING_WEBHOOK_URL, {
+      ...(payload.source ?? {}),
+      feedback,
+      previous_draft: payload.draft ?? null,
+    }, 'marketing retry');
+    return { post_promo: again.ok
+      ? 'the desk is rewriting it'
+      : 'kept as a draft — the marketing workflow did not take the rewrite' };
+  },
+});
+
 registerApprovalType('product_delist', {
   label: 'product sync',
   webhook: () => N8N_PRODUCT_SYNC_WEBHOOK_URL,
@@ -2566,6 +2738,168 @@ app.post('/api/internal/posts', wrap(async (req, res) => {
 }));
 
 /**
+ * The Marketing desk files a promo it has written.
+ *
+ * This is the one place a desk puts a post of its own on the floor, and it is
+ * deliberately the same gate a person goes through: the post is written as a
+ * draft, its copies are marked PUBLISH_PENDING, and an approval carrying the
+ * caption is filed on the desk. Approving it runs the post sync; turning it
+ * down puts the copies back to NOT_PUBLISHED and replays the brief with the
+ * feedback, so the desk rewrites the caption instead of the work being lost.
+ *
+ * `post_id` means this is that rewrite: the same post is updated rather than a
+ * second one appearing next to the first.
+ */
+app.post('/api/internal/posts/draft', wrap(async (req, res) => {
+  const department = req.body?.department ?? 'Marketing';
+  const title = String(req.body?.title ?? '').trim();
+  const body = String(req.body?.body ?? '').trim();
+  if (!title) throw new HttpError(400, 'title is required');
+  if (!body) throw new HttpError(400, 'body is required');
+  const mediaUrl = req.body?.media_url ? String(req.body.media_url) : null;
+  const productId = req.body?.product_id
+    ? assertUuid(req.body.product_id, 'product_id') : null;
+  const existingPostId = req.body?.post_id
+    ? assertUuid(req.body.post_id, 'post_id') : null;
+
+  const businessCode = req.body?.business_code ?? null;
+  const askedBusinessId = req.body?.business_id
+    ? assertUuid(req.body.business_id, 'business_id') : null;
+  if (!askedBusinessId && !businessCode) {
+    throw new HttpError(400, 'business_id or business_code is required');
+  }
+  const { rows: businesses } = await q(
+    `SELECT id FROM businesses
+      WHERE ($1::uuid IS NULL OR id = $1::uuid)
+        AND ($2::text IS NULL OR code = $2::text)`,
+    [askedBusinessId, businessCode]);
+  const business = businesses[0];
+  if (!business) throw new HttpError(404, 'business not found');
+  const closed = await internalGate(business.id);
+  if (closed) { res.status(423).json(closed); return; }
+  const businessId = business.id;
+
+  const accounts = await accountsFor(businessId, req.body ?? {});
+  const wrong = accounts.filter((a) => !POSTABLE.includes(a.platform));
+  if (wrong.length) {
+    throw new HttpError(400,
+      `${wrong.map((a) => a.label).join(', ')} cannot take a post`);
+  }
+
+  const result = await tx(async (client) => {
+    const { rows: agents } = await client.query(
+      `SELECT id, status, removed_at FROM agents
+        WHERE business_id = $1 AND department = $2 FOR UPDATE`,
+      [businessId, department]);
+    const desk = agents[0];
+    if (!desk || desk.removed_at) return { noDesk: true };
+    if (desk.status === 'PAUSED') return { paused: true };
+
+    let postId = existingPostId;
+    if (postId) {
+      const { rows } = await client.query(
+        `UPDATE social_posts SET title = $2, body = $3, media_url = $4, agent_id = $5
+          WHERE id = $1 AND business_id = $6 RETURNING id`,
+        [postId, title, body, mediaUrl, desk.id, businessId]);
+      if (!rows[0]) return { noPost: true };
+    } else {
+      const { rows } = await client.query(
+        `INSERT INTO social_posts (business_id, agent_id, title, body, media_url, status)
+         VALUES ($1, $2, $3, $4, $5, 'DRAFT') RETURNING id`,
+        [businessId, desk.id, title, body, mediaUrl]);
+      postId = rows[0].id;
+    }
+
+    await syncTargets(client, postId, accounts);
+    // On its way out, so nothing reads as a post that is merely sitting there.
+    await client.query(
+      `UPDATE social_post_targets SET state = 'PUBLISH_PENDING', last_error = NULL
+        WHERE post_id = $1 AND account_id = ANY($2::uuid[]) AND state <> 'PUBLISHED'`,
+      [postId, accounts.map((a) => a.id)]);
+
+    // What a rejection replays. Built here rather than taken from the request,
+    // so a rewrite always knows the product, the shops and the post it is for.
+    const source = {
+      ...(req.body?.source ?? {}),
+      business_id: businessId,
+      department,
+      product_id: productId,
+      brief: req.body?.brief ?? null,
+      account_ids: accounts.map((a) => a.id),
+      post_id: postId,
+    };
+    const { rows: filed } = await client.query(
+      `INSERT INTO approvals (business_id, agent_id, payload_json)
+       VALUES ($1, $2, $3::jsonb)
+       RETURNING id, business_id, agent_id, status, payload_json, created_at`,
+      [businessId, desk.id, JSON.stringify({
+        type: 'post_promo',
+        title: `Post "${title}" to ${accounts.map((a) => a.label).join(', ')}`,
+        draft: body,
+        channel: accounts[0].platform,
+        post_id: postId,
+        product_id: productId,
+        media_url: mediaUrl,
+        platforms: [...new Set(accounts.map((a) => a.platform))],
+        targets: accounts.map((a) => ({ account_id: a.id, platform: a.platform,
+          label: a.label })),
+        source,
+      })]);
+    const approval = filed[0];
+
+    await settleAgent(client, {
+      agentId: desk.id,
+      businessId,
+      status: 'AWAITING_APPROVAL',
+      message: `Promo for ${accounts.map((a) => a.label).join(', ')}`,
+    });
+    await logAction(client, {
+      businessId,
+      agentId: desk.id,
+      approvalId: approval.id,
+      action: 'DRAFT_SUBMITTED',
+      actor: 'n8n',
+      detail: { type: 'post_promo', post_id: postId, product_id: productId,
+        rewrite: Boolean(existingPostId) },
+    });
+    return { postId, approval };
+  });
+
+  if (result.noDesk) throw new HttpError(404, `no ${department} desk on this floor`);
+  if (result.noPost) throw new HttpError(404, 'post not found on this business');
+  if (result.paused) {
+    res.status(423).json({ ok: false, status: 'PAUSED',
+      error: 'the desk is paused — draft not filed' });
+    return;
+  }
+  res.status(201).json({ ok: true, approval: result.approval,
+    post: await readPost(result.postId) });
+}));
+
+/**
+ * The catalogue, for a desk that has to pick something to sell. Only what is
+ * on an open floor, and only the fields a caption is written from.
+ */
+app.get('/api/internal/products', wrap(async (req, res) => {
+  const businessCode = req.query.business_code ?? null;
+  const businessId = req.query.business_id
+    ? assertUuid(req.query.business_id, 'business_id') : null;
+  const { rows } = await q(
+    `SELECT p.id, p.business_id, p.sku, p.name, p.description, p.price, p.currency,
+            p.stock, p.images, p.status, b.code AS business_code, b.name AS business_name,
+            b.business_type
+       FROM products p
+       JOIN businesses b ON b.id = p.business_id AND b.is_active
+      WHERE ($1::uuid IS NULL OR p.business_id = $1::uuid)
+        AND ($2::text IS NULL OR b.code = $2::text)
+        AND p.status <> 'ARCHIVED'
+      ORDER BY p.stock > 0 DESC, p.updated_at DESC
+      LIMIT 200`,
+    [businessId, businessCode]);
+  res.json({ products: rows });
+}));
+
+/**
  * The only way credentials ever come back out. n8n calls this with the
  * internal token to get the keys for one account, and the read is logged, so
  * there is a record of every time a secret left the database.
@@ -2584,6 +2918,7 @@ app.get('/api/internal/accounts', wrap(async (req, res) => {
     chat: ['shopee', 'lazada', 'tiktok', 'facebook', 'instagram'],
     market: ['shopee', 'lazada', 'tiktok'],
     live: ['tiktok', 'facebook'],
+    post: POSTABLE,
   };
   const wanted = KINDS[String(req.query.kinds ?? '')] ?? PLATFORMS;
   const { rows } = await q(

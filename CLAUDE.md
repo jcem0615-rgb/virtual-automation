@@ -37,7 +37,8 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `workflows/workflow_sales_lead.json` | Lead → checkout → Ollama → approval. |
 | `workflows/workflow_messenger_inbound.json` | Meta webhook → CRM agent → approval. |
 | `workflows/workflow_approval_dispatch.json` | Approved → the real channel sender. |
-| `workflows/workflow_post_sync.json` | Approved post edit → updates each platform copy. |
+| `workflows/workflow_post_sync.json` | Approved post → posts or edits each platform copy. |
+| `workflows/workflow_marketing_post.json` | Marketing writes a promo → approval → the page. |
 | `workflows/workflow_product_sync.json` | Approved listing → Shopee, Lazada, TikTok Shop. |
 | `workflows/workflow_marketplace_chat.json` | Buyer chat in → CRM draft → approval → reply out. |
 | `workflows/workflow_order_sync.json` | Orders, payouts, and the collector's unpaid round. |
@@ -126,6 +127,28 @@ the realtime path depends on triggers.
   the environment again. `workflow_messenger_inbound.json` resolves the page the delivery
   arrived on against the connected accounts, which is also how several pages reach several
   businesses; `META_BUSINESS_CODE` is only the fallback for a page nobody has connected.
+- **A post can be written three ways, and all three end at the same gate.** A person
+  writes one in `PostsPanel` (`POST /api/posts`), the Marketing desk writes one
+  (`POST /api/internal/posts/draft`), or a sync pulls one in from a platform
+  (`POST /api/internal/posts`). The first two save a `DRAFT` that reaches nobody;
+  only `POST /api/posts/:id/publish` or the `post_promo` approval the desk files
+  sends anything. `POST /api/posts/ask` does not write a draft at all — it hands the
+  job to `N8N_MARKETING_WEBHOOK_URL` and answers 202, because the caption arrives in
+  the queue, not in the response. A paused Marketing desk and a floor with no page
+  are refused there and then, rather than looking accepted and never arriving.
+  `POSTABLE` is `facebook | instagram | tiktok`: Shopee and Lazada take a listing, so
+  offering them a caption would file work the sync can only refuse.
+- **A turned-down promo is feedback on the caption, not on the product.** `post_promo`
+  is the one post kind that replays: rejecting puts the copies back to
+  `NOT_PUBLISHED` and sends the brief, the feedback and the draft that was turned down
+  back to the marketing workflow, which rewrites **the same post** — `source.post_id`
+  is what stops a second one appearing beside the first. `post_publish` has no replay,
+  because there the no was about sending, not about the words.
+- **A desk that cannot finish a job hands it back.** The marketing workflow claims the
+  Marketing desk before it knows whether there is anything to promote, so both dead
+  ends — nothing to sell, nowhere to post, or a model that wrote nothing — go to
+  `Let The Desk Go` (`/api/internal/agents/:id/release`). A desk left `WORKING` on a
+  job nobody can finish is worse than no automation at all.
 - **A post reaching a platform is outbound work, so it goes through the gate.** Neither
   `PATCH /api/posts/:id` nor `POST /api/posts/:id/publish` touches a platform. An edit to
   a live post files a `post_update` approval and marks those targets `UPDATE_PENDING`; a
@@ -136,8 +159,25 @@ the realtime path depends on triggers.
   that is live nowhere and is only being edited is a draft and saves directly.
 - **A sender that cannot do the job says so.** The sync workflow reports a target
   `FAILED` with a readable reason rather than skipping it: Instagram and TikTok cannot
-  edit a published post, Shopee cannot create a listing from a caption, and an unset
-  credential names the variable. Keep that; a silently skipped platform looks sent.
+  edit a published post, Instagram will not take a caption with no picture, Shopee
+  cannot create a listing from a caption, and an unset credential names the account it
+  belongs to. Keep that; a silently skipped platform looks sent.
+- **Which copy a result belongs to comes from the item that went in, never the
+  response.** An HTTP node with `fullResponse` hands back `{body, headers, statusCode}`
+  and nothing of ours, so the readers used to report `post_id: undefined` and every
+  `Report Back` went to `/api/internal/posts/undefined/targets` — the platform had the
+  post and the dashboard read "sending" for ever. Each reader now walks
+  `$('<the Ready? node>').all()` by index, which is exactly the items the call
+  consumed, and `Report Back` sends `account_id` so two pages on one platform are two
+  results instead of one overwriting the other.
+- **A photo is fetched by the platform, so it has to be a full address.** Shopee,
+  Lazada, TikTok Shop, Facebook and Instagram all pull the image over HTTP from their
+  own servers while they build the listing or the post. `storeImage()` therefore hands
+  back `${PUBLIC_URL}/uploads/…`, not `/uploads/…`; with neither `PUBLIC_URL` nor
+  `OAUTH_REDIRECT_BASE` set, `preflight.js` stops. A Facebook post with a picture goes
+  to `/{page}/photos` with `url` + `caption`; without one it goes to `/{page}/feed`.
+  Instagram publishes in two calls — `/media` to build the container, `/media_publish`
+  to put it up — and a container the platform refused is never published blind.
 - **A shop is connected by authorising, not by pasting keys.** `POST /api/accounts/authorize`
   stores a single-use `connect_states` row and sends the seller to the marketplace's own
   page; the redirect lands on `/api/accounts/callback`, which checks the state belongs to
@@ -351,8 +391,16 @@ deployment change; it is faster than finding out from a customer.
   is no email sending anywhere in the stack.
 - The sign-in throttle lives in one backend process's memory. Run more than one instance
   and you want a shared limiter, or a rate limit at the proxy.
-- Marketing, Inventory, HR, Admin, Logistics, Security and Production agents are seeded
-  and rendered but have no n8n workflow of their own. Sales, CRM and Payments do.
+- Inventory, HR, Admin, Logistics, Security and Production agents are seeded and
+  rendered but have no n8n workflow of their own. Sales, CRM, Payments and Marketing do.
+- The marketing round runs at 09:00 and drafts one promo per floor. It does not know
+  what it posted last week — there is no record of which product was promoted when, so
+  on a floor with one in-stock product it will keep writing about that product. Picking
+  by "least recently promoted" needs a column; it is a row and a join, not a redesign.
+- `POST /api/posts/ask` answers 202 as soon as n8n takes the job, and nothing tells the
+  dashboard whether the model actually produced anything. A caption that never arrives
+  looks like nothing happened. The desk does go back to IDLE, so the floor is honest
+  even when the screen is quiet.
 - Lazada's statement endpoint does not carry its order lines, so a Lazada payout
   reconciles against nothing and is recorded saying so. Matching it needs
   `/finance/transaction/detail/get` per order.

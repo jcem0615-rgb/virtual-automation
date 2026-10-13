@@ -52,6 +52,14 @@ export const api = {
     if (platform && platform !== 'all') params.set('platform', platform);
     return request(`/api/posts?${params}`);
   },
+  // Writing one. It is a draft and reaches nobody — sending it is a separate
+  // click, because that is the one that files an approval.
+  createPost: (body) =>
+    request('/api/posts', { method: 'POST', body: JSON.stringify(body) }),
+  // Handing the writing to the Marketing desk instead. Comes back as soon as
+  // the workflow has taken the job; the caption turns up in the queue.
+  askMarketing: (body) =>
+    request('/api/posts/ask', { method: 'POST', body: JSON.stringify(body) }),
   editPost: (id, body) =>
     request(`/api/posts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   publishPost: (id, platforms) =>

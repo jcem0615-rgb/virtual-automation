@@ -53,7 +53,22 @@ export function sniff(buffer) {
 }
 
 /**
- * Write one picture under a business and give back the path it is served at.
+ * Where this deployment is reachable from outside it.
+ *
+ * It matters because a picture is not for us: Shopee, Lazada, TikTok Shop and
+ * Facebook all fetch the image over HTTP while they build the post or the
+ * listing, from their own servers. `/uploads/x.jpg` means nothing to them, so
+ * an upload is handed back with the full address when there is one to give.
+ * Unset, it stays relative and the senders say so rather than posting a photo
+ * nobody can load.
+ */
+export function publicBase() {
+  const base = process.env.PUBLIC_URL ?? process.env.OAUTH_REDIRECT_BASE ?? '';
+  return base.replace(/\/+$/, '');
+}
+
+/**
+ * Write one picture under a business and give back the URL it is served at.
  * The name is random: these files are public, so the only thing standing
  * between a photo and a stranger is a name nobody can guess.
  */
@@ -64,7 +79,8 @@ export async function storeImage(businessId, buffer) {
   await fs.mkdir(dir, { recursive: true });
   const name = `${crypto.randomBytes(16).toString('hex')}.${kind.ext}`;
   await fs.writeFile(path.join(dir, name), buffer);
-  return { url: `/uploads/${businessId}/${name}`, type: kind.type, bytes: buffer.length };
+  return { url: `${publicBase()}/uploads/${businessId}/${name}`,
+    type: kind.type, bytes: buffer.length };
 }
 
 /**

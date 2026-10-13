@@ -91,6 +91,7 @@ services:
       # the approval still reading as sent.
       N8N_CHAT_WEBHOOK_URL: http://n8n:5678/webhook/chat-reply
       N8N_LIVE_WEBHOOK_URL: http://n8n:5678/webhook/live-sync
+      N8N_MARKETING_WEBHOOK_URL: http://n8n:5678/webhook/marketing-post
       # 32 bytes, base64 or hex. Marketplace credentials are encrypted with it,
       # so losing it means reconnecting every seller account.
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
@@ -101,6 +102,11 @@ services:
       # Product photos land here. It is a volume, not the image, or every
       # rebuild would drop the pictures the live listings point at.
       UPLOAD_DIR: /data/uploads
+      # Where this deployment is reachable from outside it. An uploaded photo
+      # is handed back on this address, because Shopee, Lazada, TikTok Shop
+      # and Facebook all fetch the image themselves while they build the
+      # listing or the post — a path on this machine is no use to any of them.
+      PUBLIC_URL: ${PUBLIC_URL:-}
       TZ: Asia/Manila
     volumes:
       - uploads:/data/uploads

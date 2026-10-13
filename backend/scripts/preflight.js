@@ -132,11 +132,13 @@ const hooks = {
     'an approved inbox reply never reaches the buyer'],
   N8N_LIVE_WEBHOOK_URL: ['a live basket gets pinned and the room watched',
     'a live basket is never pinned and no room is watched'],
+  N8N_MARKETING_WEBHOOK_URL: ['the Marketing desk can draft a promo',
+    'nothing happens when you ask Marketing to write a post'],
 };
 for (const [name, [works, broken]] of Object.entries(hooks)) {
   if (url(name)) good(`${name} is set — ${works}`);
   else stop(`${name} is not set, so ${broken}`,
-    'docker-compose.yml sets all six; a deployment that overrides the '
+    'docker-compose.yml sets all seven; a deployment that overrides the '
     + 'environment has to set them too.');
 }
 
@@ -161,6 +163,26 @@ if (dispatch === 404) {
   stop(`n8n is not reachable (${dispatch})`,
     'The backend cannot hand an approved draft to anything.');
 } else if (dispatch !== null) good(`n8n answers the dispatch webhook (${dispatch})`);
+
+// ------------------------------------------------------------- the photos
+// Every platform fetches a picture itself, from its own servers, while it
+// builds the listing or the post. A path is no use to any of them.
+console.log('\nPhotos');
+const { rows: relative } = await q(
+  `SELECT count(*)::int AS n FROM products p
+    WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.images) u(url)
+                   WHERE u.url NOT LIKE 'http%')`);
+if (!url('PUBLIC_URL') && !url('OAUTH_REDIRECT_BASE')) {
+  stop('PUBLIC_URL is not set, so an uploaded photo is only a path',
+    'Shopee, Lazada, TikTok Shop and Facebook all fetch the image over HTTP. '
+    + 'Set it to the address the dashboard is reachable at.');
+} else good('an uploaded photo gets a full address');
+if (relative[0].n) {
+  warn(`${relative[0].n} product${relative[0].n === 1 ? ' has a photo' : 's have photos'}`
+    + ' saved as a path, not a URL',
+    'Those were uploaded before PUBLIC_URL was set. Re-upload them, or the '
+    + 'senders will refuse the copy and say why.');
+} else good('every product photo is a full address');
 
 // ------------------------------------------------------------------ live
 console.log('\nLive selling');
