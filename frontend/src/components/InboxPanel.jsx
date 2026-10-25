@@ -60,6 +60,9 @@ export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOu
   const [wordsFor, setWordsFor] = useState(null);
   const [words, setWords] = useState([]);
   const [newWords, setNewWords] = useState('');
+  // Held as text, not a number: an input you can clear while typing has to be
+  // allowed to be empty for a moment without becoming NaN.
+  const [maxRow, setMaxRow] = useState('3');
 
   const load = useCallback(async () => {
     try {
@@ -146,6 +149,7 @@ export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOu
     setWordsFor(rule.id);
     setWords(rule.escalate_words ?? []);
     setNewWords('');
+    setMaxRow(String(rule.max_in_a_row ?? 3));
   };
 
   // A comma or a newline separates them, so a seller can paste a list in one
@@ -161,15 +165,21 @@ export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOu
     setBusy(true);
     setError(null);
     try {
-      const saved = await api.setReplyRule(rule.id, reset
-        ? { reset_escalate_words: true }
-        : { escalate_words: words });
+      // Reset puts the shipped words back; the cap is this seller's choice
+      // either way, so it rides along rather than being reset with them.
+      const capped = Math.max(0, Math.min(20, Math.round(Number(maxRow) || 0)));
+      const saved = await api.setReplyRule(rule.id, {
+        ...(reset ? { reset_escalate_words: true } : { escalate_words: words }),
+        ...(capped === rule.max_in_a_row ? {} : { max_in_a_row: capped }),
+      });
       setWords(saved.rule.escalate_words ?? []);
+      setMaxRow(String(saved.rule.max_in_a_row));
       setNote(reset
         ? `${CHANNEL_LABEL[rule.channel] ?? rule.channel}: the words are back to the`
           + ` ones it came with (${saved.rule.escalate_words.length}).`
         : `${CHANNEL_LABEL[rule.channel] ?? rule.channel}: ${saved.rule.escalate_words.length}`
-          + ' words will fetch a person.');
+          + ` words will fetch a person, and so will the ${saved.rule.max_in_a_row + 1}`
+          + ' answer in a row.');
       await load();
     } catch (err) {
       if (err instanceof Unauthorized) return onSignedOut();
@@ -297,6 +307,34 @@ export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOu
                 Matched whole: <span className="font-mono">bot</span> will not fire on
                 “bother”. Put a space in one and it matches as a phrase.
               </p>
+
+              {/* The other thing that stops the desk, and the only one that is
+                  a number rather than a word. */}
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3">
+                <label htmlFor="max-in-a-row" className="text-[11px] text-slate-400">
+                  Stop and ask after
+                </label>
+                <input
+                  id="max-in-a-row"
+                  type="number"
+                  min="0"
+                  max="20"
+                  disabled={!isOwner}
+                  value={maxRow}
+                  onChange={(e) => setMaxRow(e.target.value)}
+                  className="w-16 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-center font-mono text-xs text-slate-100 outline-none focus:border-sky-500 disabled:opacity-60"
+                />
+                <span className="text-[11px] text-slate-400">
+                  answers in a row that nobody has read
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {Number(maxRow) === 0
+                    ? '— nought means every reply waits for you, like the switch being off'
+                    : `— the ${Number(maxRow) + 1}${Number(maxRow) + 1 === 2 ? 'nd'
+                      : (Number(maxRow) + 1 === 3 ? 'rd' : 'th')} waits.`
+                      + ' A reply you approve yourself resets the count.'}
+                </span>
+              </div>
               <div className="mt-2 flex flex-wrap gap-1">
                 {words.map((word) => (
                   <span
