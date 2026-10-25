@@ -55,6 +55,11 @@ export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOu
   const [error, setError] = useState(null);
   const [note, setNote] = useState(null);
   const [rules, setRules] = useState([]);
+  // Which channel's escalate words are open, and the list as it is being
+  // edited. Kept out of `rules` so cancelling really does cancel.
+  const [wordsFor, setWordsFor] = useState(null);
+  const [words, setWords] = useState([]);
+  const [newWords, setNewWords] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -134,9 +139,50 @@ export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOu
     }
   };
 
+  const openWords = (rule) => {
+    setNote(null);
+    setError(null);
+    if (wordsFor === rule.id) { setWordsFor(null); return; }
+    setWordsFor(rule.id);
+    setWords(rule.escalate_words ?? []);
+    setNewWords('');
+  };
+
+  // A comma or a newline separates them, so a seller can paste a list in one
+  // go instead of adding thirty words one at a time.
+  const addWords = () => {
+    const added = newWords.split(/[,\n]/).map((w) => w.toLowerCase().trim()).filter(Boolean);
+    if (!added.length) return;
+    setWords((current) => [...new Set([...current, ...added])]);
+    setNewWords('');
+  };
+
+  const saveWords = async (rule, { reset = false } = {}) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await api.setReplyRule(rule.id, reset
+        ? { reset_escalate_words: true }
+        : { escalate_words: words });
+      setWords(saved.rule.escalate_words ?? []);
+      setNote(reset
+        ? `${CHANNEL_LABEL[rule.channel] ?? rule.channel}: the words are back to the`
+          + ` ones it came with (${saved.rule.escalate_words.length}).`
+        : `${CHANNEL_LABEL[rule.channel] ?? rule.channel}: ${saved.rule.escalate_words.length}`
+          + ' words will fetch a person.');
+      await load();
+    } catch (err) {
+      if (err instanceof Unauthorized) return onSignedOut();
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const conversations = data?.conversations ?? [];
   const waiting = conversations.filter((c) => c.status === 'OPEN').length;
   const answering = rules.filter((r) => r.auto_reply);
+  const editing = rules.find((r) => r.id === wordsFor) ?? null;
 
   return (
     <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900">
@@ -196,28 +242,149 @@ export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOu
           </div>
           <div className="mt-2 flex flex-wrap gap-1">
             {rules.map((rule) => (
-              <button
+              /* The switch, and the words that override it. Two controls, not
+                 one: turning a channel on and deciding what always fetches a
+                 person are different decisions. */
+              <span
                 key={rule.id}
-                id={`auto-${rule.channel}`}
-                type="button"
-                disabled={!isOwner || busy}
-                title={isOwner
-                  ? 'An owner decides this. Replies the desk is unsure of still wait for you.'
-                  : 'Only an owner can change this.'}
-                onClick={() => toggleAuto(rule)}
-                className={`rounded-full border px-2.5 py-1 text-[11px] ${
+                className={`inline-flex items-stretch overflow-hidden rounded-full border ${
                   rule.auto_reply
-                    ? 'border-emerald-800 bg-emerald-950 text-emerald-300'
-                    : 'border-slate-700 text-slate-500'
-                } ${isOwner ? 'hover:bg-slate-800' : 'cursor-not-allowed opacity-70'}`}
+                    ? 'border-emerald-800 bg-emerald-950'
+                    : 'border-slate-700'
+                }`}
               >
-                {CHANNEL_LABEL[rule.channel] ?? rule.channel}
-                <span className="ml-1 font-mono opacity-70">
-                  {rule.auto_reply ? 'auto' : 'off'}
-                </span>
-              </button>
+                <button
+                  id={`auto-${rule.channel}`}
+                  type="button"
+                  disabled={!isOwner || busy}
+                  title={isOwner
+                    ? 'An owner decides this. Replies the desk is unsure of still wait for you.'
+                    : 'Only an owner can change this.'}
+                  onClick={() => toggleAuto(rule)}
+                  className={`px-2.5 py-1 text-[11px] ${
+                    rule.auto_reply ? 'text-emerald-300' : 'text-slate-500'
+                  } ${isOwner ? 'hover:bg-slate-800' : 'cursor-not-allowed opacity-70'}`}
+                >
+                  {CHANNEL_LABEL[rule.channel] ?? rule.channel}
+                  <span className="ml-1 font-mono opacity-70">
+                    {rule.auto_reply ? 'auto' : 'off'}
+                  </span>
+                </button>
+                <button
+                  id={`words-${rule.channel}`}
+                  type="button"
+                  onClick={() => openWords(rule)}
+                  title="The words that always fetch a person, whatever the desk thought"
+                  className={`border-l px-2 py-1 font-mono text-[10px] hover:bg-slate-800 ${
+                    rule.auto_reply
+                      ? 'border-emerald-900 text-emerald-400'
+                      : 'border-slate-700 text-slate-500'
+                  } ${wordsFor === rule.id ? 'bg-slate-800' : ''}`}
+                >
+                  {(rule.escalate_words ?? []).length} words
+                </button>
+              </span>
             ))}
           </div>
+
+          {editing && (
+            <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
+              <p className="text-xs text-slate-300">
+                {CHANNEL_LABEL[editing.channel] ?? editing.channel} — a buyer who writes
+                any of these gets you, not the desk
+              </p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Matched whole: <span className="font-mono">bot</span> will not fire on
+                “bother”. Put a space in one and it matches as a phrase.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {words.map((word) => (
+                  <span
+                    key={word}
+                    className="inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[11px] text-slate-300"
+                  >
+                    {word}
+                    {isOwner && (
+                      <button
+                        type="button"
+                        aria-label={`remove ${word}`}
+                        onClick={() => setWords((c) => c.filter((w) => w !== word))}
+                        className="text-slate-500 hover:text-red-300"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
+                ))}
+                {words.length === 0 && (
+                  <span className="text-[11px] text-amber-300">
+                    Nothing here. No word will fetch a person on this channel — only the
+                    desk being unsure, a reply that promises something, or the run of
+                    unread answers will.
+                  </span>
+                )}
+              </div>
+
+              {isOwner ? (
+                <>
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    <input
+                      id="new-escalate-words"
+                      value={newWords}
+                      onChange={(e) => setNewWords(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { e.preventDefault(); addWords(); }
+                      }}
+                      placeholder="reklamo, sira, hindi pa dumating"
+                      className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 outline-none focus:border-sky-500"
+                    />
+                    <button
+                      id="add-escalate-words"
+                      type="button"
+                      disabled={!newWords.trim()}
+                      onClick={addWords}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      id="save-escalate-words"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => saveWords(editing)}
+                      className="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                    >
+                      {busy ? 'Saving…' : 'Save words'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWordsFor(null)}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
+                    >
+                      Cancel
+                    </button>
+                    {/* Deleting the word for "refund" is otherwise one-way:
+                        there is nowhere to read the original set back from. */}
+                    <button
+                      id="reset-escalate-words"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => saveWords(editing, { reset: true })}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      Put the defaults back
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="mt-3 text-[11px] text-slate-500">
+                  Only an owner can change this list.
+                </p>
+              )}
+            </div>
+          )}
           {answering.length > 0 && (
             <p className="mt-2 text-[11px] text-amber-300">
               Replies on those channels go to the buyer without you reading them first.

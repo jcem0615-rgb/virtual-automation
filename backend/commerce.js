@@ -708,10 +708,21 @@ export function registerCommerce(app, ctx) {
       if (words.some((w) => w.length > 60)) throw new HttpError(400, 'one of those is not a word');
       patch.escalate_words = [...new Set(words)];
     }
-    if (!Object.keys(patch).length) throw new HttpError(400, 'nothing to change');
+    // The way back. Editing this list is one-way otherwise: delete the word
+    // for "refund" and there is nowhere to read the original set from. The
+    // column's own DEFAULT is that set, so `SET … = DEFAULT` restores it
+    // without the list existing in two places to drift apart.
+    const resetWords = body.reset_escalate_words === true;
+    if (resetWords) delete patch.escalate_words;
+    if (!Object.keys(patch).length && !resetWords) {
+      throw new HttpError(400, 'nothing to change');
+    }
 
     const keys = Object.keys(patch);
-    const sets = keys.map((k, i) => `${k} = $${i + 3}`).join(', ');
+    const sets = [
+      ...keys.map((k, i) => `${k} = $${i + 3}`),
+      ...(resetWords ? ['escalate_words = DEFAULT'] : []),
+    ].join(', ');
     const updated = await tx(async (client) => {
       const { rows } = await client.query(
         `UPDATE reply_rules SET ${sets}
@@ -725,7 +736,10 @@ export function registerCommerce(app, ctx) {
           : (patch.auto_reply === false ? 'AUTO_REPLY_DISABLED' : 'REPLY_RULE_CHANGED'),
         actor: req.user.email,
         actorUserId: req.user.id,
-        detail: { channel: rule.channel, ...patch },
+        // What escalates is worth reading back later, so the words go in the
+        // log as they ended up rather than as a count.
+        detail: { channel: rule.channel, ...patch,
+          ...(resetWords ? { escalate_words: rows[0].escalate_words, reset: true } : {}) },
       });
       return rows[0];
     });

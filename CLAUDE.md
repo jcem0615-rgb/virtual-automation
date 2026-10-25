@@ -473,8 +473,11 @@ deployment change; it is faster than finding out from a customer.
   one an Ollama call, and `max_in_a_row` only stops the run of *unread* answers in a single
   thread. A flood across many threads is not capped anywhere.
 - `escalate_words` ships with English and Tagalog, and that is all. A seller whose buyers
-  write Bisaya, Ilocano or Hiligaynon has to add their own words, and nothing in the UI
-  prompts them to — the switches are there, the word list is API-only.
+  write Bisaya, Ilocano or Hiligaynon has to add their own, which the Inbox now lets them
+  do — but nothing prompts them to, and nothing notices that every held reply on a floor
+  was held by the same word.
+- `max_in_a_row` is still API-only. The words and the switch are on screen; the number of
+  unread answers a thread may have is not.
 - Nothing imports the workflows into n8n. `docker-compose.yml` mounts `./workflows` at
   `/workflows` and the README gives the one-line import, but a fresh stack has an empty
   n8n until somebody runs it — and an imported workflow still has to be activated by hand.

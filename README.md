@@ -387,10 +387,17 @@ log, and the message marked **answered by the desk** in the thread, next to the 
 **Pausing the CRM desk stops all of it, immediately** — that is the stop button, and it
 also stops the drafting. Suspending the business does the same.
 
+**Editing the words.** Next to each channel's switch is a **_n_ words** button. It opens
+that channel's list: every word as a chip you can take off, and a box to add more — commas
+or Enter, so you can paste a dozen at once. Nothing is saved until you press **Save
+words**, and **Put the defaults back** restores the set it shipped with, so deleting
+"refund" is never a one-way door. A reviewer can read the list; only an owner can change
+it. The list is per channel and per business, and `PATCH /api/reply-rules/:id` does the
+same thing if you would rather script it.
+
 What it will not do: it does not understand the buyer, it reads words. Someone furious in
 words that are not on the list will get a polite automatic answer. Turn it on one channel
-at a time, read the inbox for a few days, and add your own words — the list is per channel
-and per business, through `PATCH /api/reply-rules/:id`.
+at a time, read the inbox for a few days, and add the words your own buyers actually use.
 
 ## Adding another business
 
