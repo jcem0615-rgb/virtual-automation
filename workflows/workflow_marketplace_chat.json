@@ -1,5 +1,5 @@
 {
-  "name": "Marketplace Chat → CRM Draft → Approval → Reply",
+  "name": "Marketplace Chat \u2192 CRM Draft \u2192 Approval \u2192 Reply",
   "active": false,
   "settings": {
     "executionOrder": "v1"
@@ -53,7 +53,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Fan out: one item per account that can carry a buyer conversation. The\n// credentials are per account — two Shopee shops are two different shops —\n// so nothing below ever reuses another account's token.\nconst accounts = $input.first().json.accounts ?? [];\nconst CHAT = { shopee: 'shopee_chat', lazada: 'lazada_chat',\n               tiktok: 'tiktok_dm', facebook: 'meta_dm', instagram: 'instagram_dm' };\nreturn accounts\n  .filter((a) => CHAT[a.platform] && a.sync_enabled)\n  .map((a) => ({ json: {\n    business_id: a.business_id,\n    account_id: a.id,\n    platform: a.platform,\n    channel: CHAT[a.platform],\n    label: a.label,\n    // Only look as far back as the last sweep plus a minute of slack, so a\n    // long-running poll cannot miss a message that arrived mid-run.\n    since: new Date(Date.now() - 180000).toISOString(),\n  } }));\n"
+        "jsCode": "// Fan out: one item per account that can carry a buyer conversation. The\n// credentials are per account \u2014 two Shopee shops are two different shops \u2014\n// so nothing below ever reuses another account's token.\nconst accounts = $input.first().json.accounts ?? [];\nconst CHAT = { shopee: 'shopee_chat', lazada: 'lazada_chat',\n               tiktok: 'tiktok_dm', facebook: 'meta_dm', instagram: 'instagram_dm' };\nreturn accounts\n  .filter((a) => CHAT[a.platform] && a.sync_enabled)\n  .map((a) => ({ json: {\n    business_id: a.business_id,\n    account_id: a.id,\n    platform: a.platform,\n    channel: CHAT[a.platform],\n    label: a.label,\n    // Only look as far back as the last sweep plus a minute of slack, so a\n    // long-running poll cannot miss a message that arrived mid-run.\n    since: new Date(Date.now() - 180000).toISOString(),\n  } }));\n"
       },
       "id": "d1000000-0000-4000-8000-000000000003",
       "name": "One Account Each",
@@ -188,7 +188,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Lazada: /im/message/list under the open platform's sorted-parameter\n// signature — app_secret, then every key and value in order, then app_secret.\nconst crypto = require('crypto');\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst item = $('One Account Each').item.json;\nconst host = creds.host || 'https://api.lazada.com.ph/rest';\nconst path = '/im/message/list';\nconst params = {\n  app_key: creds.app_key, access_token: creds.access_token,\n  timestamp: String(Date.now()), sign_method: 'sha256',\n  page_size: '30',\n};\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst sign = crypto.createHmac('sha256', creds.app_secret)\n  .update(path + sorted).digest('hex').toUpperCase();\nconst query = new URLSearchParams({ ...params, sign });\nreturn [{ json: { ...item, url: `${host}${path}?${query}`, vendor: 'lazada' } }];\n"
+        "jsCode": "// Lazada: /im/message/list under the open platform's sorted-parameter\n// signature \u2014 app_secret, then every key and value in order, then app_secret.\nconst crypto = require('crypto');\nconst creds = $('Get Account Credentials').item.json.credentials;\nconst item = $('One Account Each').item.json;\nconst host = creds.host || 'https://api.lazada.com.ph/rest';\nconst path = '/im/message/list';\nconst params = {\n  app_key: creds.app_key, access_token: creds.access_token,\n  timestamp: String(Date.now()), sign_method: 'sha256',\n  page_size: '30',\n};\nconst sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\nconst sign = crypto.createHmac('sha256', creds.app_secret)\n  .update(path + sorted).digest('hex').toUpperCase();\nconst query = new URLSearchParams({ ...params, sign });\nreturn [{ json: { ...item, url: `${host}${path}?${query}`, vendor: 'lazada' } }];\n"
       },
       "id": "d1000000-0000-4000-8000-000000000007",
       "name": "Poll Lazada Chat",
@@ -302,7 +302,7 @@
         600,
         -140
       ],
-      "notes": "423 means the floor is suspended — the run stops there for that account."
+      "notes": "423 means the floor is suspended \u2014 the run stops there for that account."
     },
     {
       "parameters": {
@@ -436,7 +436,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// The prompt is built from the skills this desk actually has switched on, so\n// turning one off in the dashboard really does change what the model is asked\n// to do rather than only what the screen says.\nconst checkout = $('Claim The CRM Desk').item.json;\nconst thread = $('Read The Thread').item.json;\nconst skills = (checkout.skills ?? []).map((s) => `- ${s.name}: ${s.summary}`).join('\\n');\nconst history = (thread.messages ?? [])\n  .map((m) => `${m.direction === 'IN' ? 'Buyer' : 'Us'}: ${m.body}`)\n  .join('\\n');\nconst c = thread.conversation ?? {};\n\nconst prompt = [\n  `You answer buyers for ${c.account_label ?? 'our shop'} on ${c.channel}.`,\n  'What this desk is for:', skills || '- answering buyers politely and accurately',\n  '',\n  'Rules:',\n  '- Write one short reply, in the language the buyer used.',\n  '- Philippine pesos, written as PHP 1,250.',\n  '- Never promise stock, a delivery date or a discount you were not told about.',\n  '- If you do not know, say you will check — do not invent an answer.',\n  '- Never offer to call them: this channel has no voice, only chat.',\n  '',\n  c.product_name ? `They seem to be asking about: ${c.product_name} (${c.product_sku}).` : '',\n  '', 'The conversation so far:', history,\n  '', 'Write only the reply.',\n].filter(Boolean).join('\\n');\n\nreturn [{ json: { prompt, conversation_id: c.id, business_id: c.business_id,\n                  agent_id: checkout.agent.id } }];\n"
+        "jsCode": "// The prompt is built from the skills this desk has switched on, so turning\n// one off in the dashboard really does change what the model is asked to do\n// rather than only what the screen says.\n//\n// It asks for one JSON object rather than loose text, because the answer is\n// not only the reply: it is also whether the desk was sure of it and whether\n// this needs a person. `reply_rules` can let an answer go straight to the\n// buyer, and the only honest way to do that is for the model to say out loud\n// when it was guessing.\nconst checkout = $('Claim The CRM Desk').item.json;\nconst thread = $('Read The Thread').item.json;\nconst skills = (checkout.skills ?? []).map((s) => `- ${s.name}: ${s.summary}`).join('\\n');\nconst history = (thread.messages ?? [])\n  .map((m) => `${m.direction === 'IN' ? 'Buyer' : 'Us'}: ${m.body}`)\n  .join('\\n');\nconst c = thread.conversation ?? {};\nconst agent = checkout.agent ?? {};\nconst money = (n) => `PHP ${Number(n).toLocaleString('en-PH')}`;\n\nconst prompt = [\n  `You are ${agent.name ?? 'the customer care desk'}, ${agent.role_title ?? 'Customer Care'},`,\n  `answering buyers for ${c.account_label ?? 'our shop'} on ${c.channel}.`,\n  '',\n  'What this desk is for:', skills || '- answering buyers politely and accurately',\n  '',\n  'Write the next reply in this conversation.',\n  '',\n  'How to sound:',\n  '- Like a real person on the shop\u2019s team who is glad they wrote.',\n  '- Mirror the buyer\u2019s language exactly: Tagalog gets Tagalog, Taglish gets',\n  '  Taglish, English gets English. Use \"po\" and \"opo\" when they are being formal.',\n  '- Short. Two or three sentences, the way somebody types on a phone.',\n  '- Answer the actual question first, then offer one useful next step.',\n  '- Warm and positive, never pushy, and never a wall of text.',\n  '',\n  'What you must never do:',\n  '- Never invent a price, a stock count, a delivery date, a discount, a voucher',\n  '  or free shipping. Only what is written below is true.',\n  '- Never agree to a refund, a return, a cancellation or a replacement.',\n  '- Never offer to call or ring them: this channel has no voice, only chat.',\n  '- Never say you are an AI, a bot or automated, and never claim to be human',\n  '  either. If they ask who they are talking to, that is for a person.',\n  '- If you do not know, say you will check. Do not guess.',\n  '',\n  'What you actually know:',\n  c.product_name\n    ? `- They seem to be asking about ${c.product_name} (${c.product_sku}).`\n    : '- No particular product is attached to this thread.',\n  c.product_price ? `- Its price is ${money(c.product_price)}.` : '',\n  c.product_stock !== undefined && c.product_stock !== null\n    ? `- Stock on hand right now: ${c.product_stock}.`\n    : '',\n  '',\n  'The conversation so far:',\n  history || 'Buyer: (no message text)',\n  '',\n  'Answer with one JSON object and nothing else, no code fence:',\n  '{\"reply\":\"the message to send\",\"confident\":true,\"needs_human\":false,\"reason\":\"\"}',\n  '',\n  '- confident is false if you had to guess at anything at all.',\n  '- needs_human is true when a person should handle it: a complaint, money',\n  '  going back, a problem with an order, a question about who they are talking',\n  '  to, a price or a date you were not given, or anything you are unsure of.',\n  '- reason is a few words, only when confident is false or needs_human is true.',\n].filter(Boolean).join('\\n');\n\nreturn [{ json: { prompt, conversation_id: c.id, business_id: c.business_id,\n                  agent_id: checkout.agent.id } }];\n"
       },
       "id": "d1000000-0000-4000-8000-000000000017",
       "name": "Build The Prompt",
@@ -475,8 +475,21 @@
     },
     {
       "parameters": {
-        "url": "={{ $env.BACKEND_URL }}/api/internal/approvals",
+        "jsCode": "// Ollama hands back a string, and a model told to answer in JSON will still\n// sometimes wrap it in a sentence or a code fence. So this parses what it can\n// and is deliberately pessimistic about what it cannot: an answer that did not\n// come back in the agreed shape is an answer nobody vouched for, so the text\n// still becomes the draft but it goes to a person rather than to the buyer.\nconst raw = String($json.response ?? '').trim();\nconst built = $('Build The Prompt').item.json;\n\nfunction parse(text) {\n  const start = text.indexOf('{');\n  const end = text.lastIndexOf('}');\n  if (start === -1 || end <= start) return null;\n  try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }\n}\n\nconst parsed = parse(raw);\nconst reply = String(parsed?.reply ?? raw)\n  .replace(/^```(?:json)?/i, '')\n  .replace(/```$/, '')\n  .replace(/^[\"'`]+|[\"'`]+$/g, '')\n  .trim();\n\nreturn [{ json: {\n  conversation_id: built.conversation_id,\n  agent_id: built.agent_id,\n  draft: reply,\n  // No verdict is not a yes.\n  confident: parsed ? parsed.confident === true : false,\n  needs_human: parsed ? parsed.needs_human === true : true,\n  reason: parsed\n    ? String(parsed.reason ?? '').slice(0, 300)\n    : 'the desk did not answer in the agreed format',\n} }];\n"
+      },
+      "id": "read-answer",
+      "name": "Read The Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2030,
+        -260
+      ]
+    },
+    {
+      "parameters": {
         "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/conversations/{{ $json.conversation_id }}/draft",
         "options": {
           "response": {
             "response": {
@@ -495,14 +508,14 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ agent_id: $('Build The Prompt').item.json.agent_id, payload: { type: \"chat_reply\", title: `Reply to ${$('Read The Thread').item.json.conversation.buyer_name}`, draft: ($json.response || \"\").trim(), channel: $('Read The Thread').item.json.conversation.channel, recipient: $('Read The Thread').item.json.conversation.buyer_handle, conversation_id: $('Build The Prompt').item.json.conversation_id, account_id: $('Read The Thread').item.json.conversation.account_id, source: { conversation_id: $('Build The Prompt').item.json.conversation_id } } }) }}"
+        "jsonBody": "={{ JSON.stringify({ draft: $json.draft, confident: $json.confident, needs_human: $json.needs_human, reason: $json.reason }) }}"
       },
       "id": "d1000000-0000-4000-8000-000000000019",
       "name": "File The Draft",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2140,
+        2250,
         -260
       ],
       "notes": "PENDING. Nothing has reached the buyer; the desk now reads AWAITING_APPROVAL until a human clicks."
@@ -689,6 +702,27 @@
                 ]
               },
               "outputKey": "facebook"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "version": 2,
+                  "caseSensitive": true
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "a",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $('What Was Approved').item.json.platform }}",
+                    "rightValue": "instagram"
+                  }
+                ]
+              },
+              "outputKey": "instagram"
             }
           ]
         },
@@ -746,7 +780,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Meta: the Send API, on the page token this account holds.\nconst creds = $('Credentials To Send With').item.json.credentials;\nconst msg = $('What Was Approved').item.json;\nif (!creds?.page_access_token) {\n  return [{ json: { ...msg, failed: true,\n    error: 'META page_access_token is not set for this page' } }];\n}\nreturn [{ json: { ...msg,\n  url: `https://graph.facebook.com/v21.0/me/messages?access_token=${creds.page_access_token}`,\n  method: 'POST',\n  payload: { recipient: { id: msg.recipient }, messaging_type: 'RESPONSE',\n             message: { text: msg.text } } } }];\n"
+        "jsCode": "// Meta: the Send API, on the page token this account holds.\nconst creds = $('Credentials To Send With').item.json.credentials;\nconst msg = $('What Was Approved').item.json;\nif (!creds?.page_access_token) {\n  return [{ json: { ...msg, failed: true,\n    error: 'META page_access_token is not set for this page' } }];\n}\nconst asIg = msg.platform === 'instagram';\nif (asIg && !creds.instagram_id) {\n  return [{ json: { ...msg, failed: true,\n    error: 'no Instagram business account id is stored for this account \u2014 reconnect it' } }];\n}\nconst who = asIg ? creds.instagram_id : (creds.page_id || 'me');\nreturn [{ json: { ...msg,\n  url: `https://graph.facebook.com/v21.0/${who}/messages`\n     + `?access_token=${creds.page_access_token}`,\n  method: 'POST',\n  payload: { recipient: { id: msg.recipient }, messaging_type: 'RESPONSE',\n             message: { text: msg.text } } } }];\n"
       },
       "id": "d1000000-0000-4000-8000-000000000028",
       "name": "Send On Messenger",
@@ -759,7 +793,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Nobody wired a sender for this channel. The reply is reported as failed with\n// the reason, so the thread goes back to OPEN and somebody can answer by hand\n// — rather than the approval looking sent and the buyer hearing nothing.\nconst msg = $('What Was Approved').item.json;\nreturn [{ json: { ...msg, failed: true,\n  error: `No sender is wired up for ${msg.channel} yet.` } }];\n"
+        "jsCode": "// Nobody wired a sender for this channel. The reply is reported as failed with\n// the reason, so the thread goes back to OPEN and somebody can answer by hand\n// \u2014 rather than the approval looking sent and the buyer hearing nothing.\nconst msg = $('What Was Approved').item.json;\nreturn [{ json: { ...msg, failed: true,\n  error: `No sender is wired up for ${msg.channel} yet.` } }];\n"
       },
       "id": "d1000000-0000-4000-8000-000000000029",
       "name": "No Sender For This",
@@ -1064,7 +1098,7 @@
       "main": [
         [
           {
-            "node": "File The Draft",
+            "node": "Read The Answer",
             "type": "main",
             "index": 0
           }
@@ -1123,6 +1157,13 @@
         [
           {
             "node": "Send On TikTok",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send On Messenger",
             "type": "main",
             "index": 0
           }
@@ -1214,6 +1255,17 @@
         [
           {
             "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read The Answer": {
+      "main": [
+        [
+          {
+            "node": "File The Draft",
             "type": "main",
             "index": 0
           }

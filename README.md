@@ -114,6 +114,7 @@ Before you point a domain at it:
 | See the floor and the queue | ✅ | ✅ | only where granted |
 | Approve / reject a draft | ✅ | ✅ | only where granted |
 | Pause or resume an agent | ❌ | ✅ | only where granted |
+| Let the desk answer buyers unread | ❌ | ✅ | only where granted |
 | Open / suspend a business | ❌ | ❌ | ✅ |
 | Create accounts | ❌ | ❌ | ✅ |
 | Read any draft, anywhere | — | own business | **never** |
@@ -294,8 +295,10 @@ parameters and the body. The Lazada host follows the account's region.
 
 ## Connecting a Facebook or Instagram page
 
-The CRM agent can answer Messenger, and the reply still waits for a human. Nothing is
-sent until somebody approves it on the floor.
+The CRM agent answers Messenger and Instagram DMs. A Meta message is filed as an inbox
+thread like a Shopee or Lazada chat, so it has history, the product it is about, and the
+same two outcomes: the reply waits for you, or — if you switched that channel on — the
+desk sends it itself. See **Letting the desk answer by itself** below.
 
 **1. Make the webhook reachable.** Meta has to be able to call n8n. The production
 overlay publishes only `/n8n-webhook/` for that, so your webhook URL is:
@@ -345,6 +348,49 @@ subscribe that account.
 **Other channels.** `workflow_approval_dispatch.json` routes on
 `payload_json.channel`, so adding WhatsApp, Shopee, Viber or email is a matter of adding
 a branch to that switch and a sender node. The approval gate stays where it is.
+
+## Letting the desk answer by itself
+
+Everything else in this app waits for you. This is the one thing that does not have to,
+because a buyer on Shopee or Messenger who asks "available pa po?" expects an answer in
+seconds, and a seller who replies tomorrow has lost the sale.
+
+It is **off on every channel** until you turn it on. In the **Inbox**, under *Let the desk
+answer by itself*, there is one switch per channel — Shopee chat, Lazada chat, TikTok DM,
+Messenger, Instagram DM, email. Only an **owner** can flip one, and flipping it is written
+to the activity log with your email on it.
+
+With a channel on, a buyer message still goes the whole way round — the CRM desk is
+claimed, your local model writes the reply from the thread, the product's real price and
+the real stock count — and then **the backend decides whether it goes out or waits**.
+It waits, exactly as before, when:
+
+- the model said it had to guess, or said a person should take this one;
+- the model's answer did not come back in the agreed format at all (no verdict is not a
+  yes);
+- the buyer's message contained any of the channel's **escalate words** — refund, return,
+  cancel, complaint, damaged, scam, lawyer, warranty, *reklamo*, *palit*, *hindi dumating*,
+  and `bot` / `human` / `manager`, so a buyer asking who they are talking to always gets a
+  person;
+- the reply itself **promises something** — a refund, a discount, free delivery, a date, a
+  replacement. This one is blunt on purpose and will occasionally hold a perfectly good
+  reply. That is the cheap mistake;
+- the thread already has **three answers in a row** that nobody read. A buyer still asking
+  after three goes is a buyer the model is not helping. Any reply you approve yourself
+  resets that count.
+
+What goes out is written down the same way an approved reply is: an approval row that
+reached `APPROVED` with `auto` on it instead of your email, both halves in the activity
+log, and the message marked **answered by the desk** in the thread, next to the ones marked
+*approved by you*. Nothing is hidden from you after the fact.
+
+**Pausing the CRM desk stops all of it, immediately** — that is the stop button, and it
+also stops the drafting. Suspending the business does the same.
+
+What it will not do: it does not understand the buyer, it reads words. Someone furious in
+words that are not on the list will get a polite automatic answer. Turn it on one channel
+at a time, read the inbox for a few days, and add your own words — the list is per channel
+and per business, through `PATCH /api/reply-rules/:id`.
 
 ## Adding another business
 

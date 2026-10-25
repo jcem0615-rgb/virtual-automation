@@ -660,6 +660,40 @@ app.get('/api/state', wrap(async (req, res) => {
   res.json({ businesses, agents, approvals, logs });
 }));
 
+/**
+ * Hand an approved row to the workflow that sends it.
+ *
+ * Called once the row is committed as APPROVED and never before, because a
+ * workflow that reads it back would otherwise find it still PENDING. Which
+ * workflow it goes to is the registered kind's business, not the caller's.
+ *
+ * Two things reach here: a human pressing Approve, and the CRM desk answering
+ * a buyer by itself under `reply_rules`. They share this function on purpose
+ * — the second is not a separate send path with its own bugs, it is the same
+ * one with a different name on the row.
+ */
+async function dispatchApproval(approval) {
+  const payload = approval.payload_json ?? {};
+  const handler = handlerFor(payload);
+  const target = handler?.webhook?.() ?? N8N_DISPATCH_WEBHOOK_URL;
+  const extra = handler?.enrich ? await handler.enrich(payload) : {};
+  const dispatch = await callWebhook(target, {
+    approval_id: approval.id,
+    business_id: approval.business_id,
+    agent_id: approval.agent_id,
+    payload,
+    ...extra,
+  }, handler?.label ?? 'dispatch');
+
+  // Nothing took the job, so the platforms are not going to change. Clear
+  // whatever was showing as on its way, or it reads as sent forever.
+  if (!dispatch.ok && handler?.onDispatchFailed) {
+    await Promise.resolve(handler.onDispatchFailed(payload, 'the job could not be queued'))
+      .catch((err) => console.error(`[${payload.type}] rollback failed:`, err.message));
+  }
+  return dispatch;
+}
+
 // APPROVE_TASK — a single guarded UPDATE is the whole race protection: two
 // reviewers (or one double click) both run it, only one sees a row back.
 app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
@@ -706,28 +740,7 @@ app.post('/api/approvals/:id/approve', wrap(async (req, res) => {
       { status: current.status });
   }
 
-  // Dispatch happens only after the row is committed as APPROVED, and which
-  // workflow it goes to is the registered kind's business, not this route's.
-  const payload = outcome.payload_json ?? {};
-  const handler = handlerFor(payload);
-  const target = handler?.webhook?.() ?? N8N_DISPATCH_WEBHOOK_URL;
-  const extra = handler?.enrich ? await handler.enrich(payload) : {};
-  const dispatch = await callWebhook(target, {
-    approval_id: outcome.id,
-    business_id: outcome.business_id,
-    agent_id: outcome.agent_id,
-    payload,
-    ...extra,
-  }, handler?.label ?? 'dispatch');
-
-  // Nothing took the job, so the platforms are not going to change. Clear
-  // whatever was showing as on its way, or it reads as sent forever.
-  if (!dispatch.ok && handler?.onDispatchFailed) {
-    await Promise.resolve(handler.onDispatchFailed(payload, 'the job could not be queued'))
-      .catch((err) => console.error(`[${payload.type}] rollback failed:`, err.message));
-  }
-
-  res.json({ ok: true, approval_id: outcome.id, dispatch });
+  res.json({ ok: true, approval_id: outcome.id, dispatch: await dispatchApproval(outcome) });
 }));
 
 // REJECT_TASK — replays the original request through n8n with the feedback and
@@ -3151,7 +3164,7 @@ app.post('/api/internal/agents/:id/release', wrap(async (req, res) => {
 const moduleContext = {
   q, tx, wrap, HttpError, assertUuid, businessClause, scopeFor, requireOwner,
   assertInScope, logAction, settleAgent, deskFor, requireUser,
-  registerApprovalType, internalGate, callWebhook,
+  registerApprovalType, internalGate, callWebhook, dispatchApproval,
   chatWebhookUrl: () => N8N_CHAT_WEBHOOK_URL || N8N_DISPATCH_WEBHOOK_URL,
   orderSyncWebhookUrl: () => N8N_PRODUCT_SYNC_WEBHOOK_URL,
   liveWebhookUrl: () => N8N_LIVE_WEBHOOK_URL || N8N_DISPATCH_WEBHOOK_URL,

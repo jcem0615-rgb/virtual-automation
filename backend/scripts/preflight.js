@@ -75,6 +75,27 @@ for (const t of types) {
   }
 }
 
+// ----------------------------------------------------- who answers buyers
+// Not a fault either way, but it is the one setting that changes what reaches
+// a customer without anybody reading it, so nobody should have to go looking
+// for it. Printed loudly in both directions.
+console.log('\nAnswering buyers');
+const { rows: answering } = await q(
+  `SELECT b.code, r.channel, r.max_in_a_row,
+          array_length(r.escalate_words, 1) AS words
+     FROM reply_rules r JOIN businesses b ON b.id = r.business_id AND b.is_active
+    WHERE r.auto_reply ORDER BY b.code, r.channel`);
+if (!answering.length) {
+  good('every reply waits for a human — answering by itself is off everywhere');
+} else {
+  for (const row of answering) {
+    warn(`${row.code}/${row.channel}: the desk answers buyers without a person`,
+      `Held for a human after ${row.max_in_a_row} unread answers in a thread, on any of `
+      + `${row.words} escalate words, and on any reply that promises something. `
+      + 'Pausing that floor\'s CRM desk stops it.');
+  }
+}
+
 // --------------------------------------------------------- the marketplaces
 console.log('\nConnecting a shop');
 for (const platform of ['shopee', 'lazada', 'tiktok', 'facebook', 'instagram']) {

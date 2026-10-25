@@ -109,7 +109,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Verify Meta's signature, then pull out the one thing we care about:\n// who wrote, and what they said. Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto,\n// which docker-compose.yml sets for the n8n service.\nconst crypto = require('crypto');\n\nconst raw = $input.item.binary?.data\n  ? Buffer.from($input.item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify($input.item.json.body ?? {});\nconst signature = $input.item.json.headers?.['x-hub-signature-256'] ?? '';\nconst secret = $env.META_APP_SECRET;\n\nif (secret) {\n  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(signature);\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    throw new Error('bad X-Hub-Signature-256 \u2014 dropping this delivery');\n  }\n}\n\nconst body = typeof raw === 'string' ? JSON.parse(raw) : raw;\nconst entry = body.entry?.[0] ?? {};\nconst event = entry.messaging?.[0] ?? {};\n\n// Echoes of our own sends, and read receipts, are not customer messages.\nconst text = event.message?.text;\nconst isEcho = event.message?.is_echo === true;\n\nreturn { json: {\n  skip: !text || isEcho,\n  psid: event.sender?.id ?? null,\n  page_id: entry.id ?? null,\n  message: text ?? '',\n  business_code: $env.META_BUSINESS_CODE || 'BIZ_ELEC',\n} };"
+        "jsCode": "// Verify Meta's signature, then pull out the one thing we care about:\n// who wrote, and what they said. Requires NODE_FUNCTION_ALLOW_BUILTIN=crypto,\n// which docker-compose.yml sets for the n8n service.\nconst crypto = require('crypto');\n\nconst raw = $input.item.binary?.data\n  ? Buffer.from($input.item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify($input.item.json.body ?? {});\nconst signature = $input.item.json.headers?.['x-hub-signature-256'] ?? '';\nconst secret = $env.META_APP_SECRET;\n\nif (secret) {\n  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(signature);\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    throw new Error('bad X-Hub-Signature-256 \u2014 dropping this delivery');\n  }\n}\n\nconst body = typeof raw === 'string' ? JSON.parse(raw) : raw;\nconst entry = body.entry?.[0] ?? {};\nconst event = entry.messaging?.[0] ?? {};\n\n// Echoes of our own sends, and read receipts, are not customer messages.\nconst text = event.message?.text;\nconst isEcho = event.message?.is_echo === true;\n\nreturn { json: {\n  skip: !text || isEcho,\n  psid: event.sender?.id ?? null,\n  page_id: entry.id ?? null,\n  message: text ?? '',\n  // Meta's own id for this message, so a redelivered webhook is recorded\n  // once rather than appearing twice in the thread.\n  message_id: event.message?.mid ?? null,\n  business_code: $env.META_BUSINESS_CODE || 'BIZ_ELEC',\n} };"
       },
       "id": "c1000000-0000-4000-8000-000000000006",
       "name": "Verify & Extract",
@@ -146,7 +146,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Which floor this page belongs to, and which connected account it is.\n// Meta's delivery names the page it arrived on, so the page answers both\n// questions \u2014 and the reply goes back out on that page's own token,\n// rather than on whichever single token the deployment was given.\n//\n// META_BUSINESS_CODE is still the fallback for a page nobody has\n// connected yet, which is how this worked before: one page, one floor.\nconst message = $('Verify & Extract').item.json;\nconst accounts = $input.first().json.accounts ?? [];\nconst page = accounts.find((a) => a.external_id\n  && String(a.external_id) === String(message.page_id)\n  && ['facebook', 'instagram'].includes(a.platform));\n\nreturn [{ json: {\n  ...message,\n  account_id: page?.id ?? null,\n  account_label: page?.label ?? null,\n  business_code: page?.business_code ?? message.business_code,\n} }];\n"
+        "jsCode": "// Which floor this page belongs to, and which connected account it is.\n// Meta's delivery names the page it arrived on, so the page answers both\n// questions \u2014 and the reply goes back out on that page's own token,\n// rather than on whichever single token the deployment was given.\n//\n// META_BUSINESS_CODE is still the fallback for a page nobody has\n// connected yet, which is how this worked before: one page, one floor.\nconst message = $('Verify & Extract').item.json;\nconst accounts = $input.first().json.accounts ?? [];\nconst page = accounts.find((a) => a.external_id\n  && String(a.external_id) === String(message.page_id)\n  && ['facebook', 'instagram'].includes(a.platform));\n\nreturn [{ json: {\n  ...message,\n  account_id: page?.id ?? null,\n  account_label: page?.label ?? null,\n  // Facebook and Instagram arrive on the same webhook, and which one this is\n  // decides the channel the thread is filed under.\n  account_platform: page?.platform ?? 'facebook',\n  business_code: page?.business_code ?? message.business_code,\n} }];\n"
       },
       "id": "d7000000-0000-4000-8000-0000000000c2",
       "name": "Whose Page Is It?",
@@ -192,14 +192,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/checkout",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ business_code: $json.business_code, department: 'CRM', task: 'Messenger: ' + $json.message.slice(0, 100) }) }}",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/conversations",
         "options": {
           "response": {
             "response": {
-              "fullResponse": true,
               "neverError": true
             }
           }
@@ -212,90 +208,88 @@
               "value": "={{ $env.INTERNAL_TOKEN }}"
             }
           ]
-        }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ business_code: $json.business_code, account_id: $json.account_id, channel: $json.account_platform === 'instagram' ? 'instagram_dm' : 'meta_dm', external_id: $json.psid, buyer_name: $json.buyer_name || 'Buyer', buyer_handle: $json.psid, body: $json.message, message_external_id: $json.message_id }) }}"
       },
-      "id": "c1000000-0000-4000-8000-000000000008",
-      "name": "Checkout CRM Agent",
+      "id": "file-inbound",
+      "name": "File Inbound",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        -100,
-        340
-      ],
-      "notes": "423 means a human paused the CRM desk \u2014 the conversation is left alone."
+        120,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/agents/checkout",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ business_code: $('Whose Page Is It?').item.json.business_code, department: 'CRM', task: 'Messenger: ' + $('Whose Page Is It?').item.json.message.slice(0, 100) }) }}"
+      },
+      "id": "claim-crm",
+      "name": "Claim The CRM Desk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        340,
+        420
+      ]
     },
     {
       "parameters": {
         "conditions": {
           "options": {
-            "caseSensitive": true,
-            "version": 2
+            "version": 2,
+            "caseSensitive": true
           },
           "combinator": "and",
           "conditions": [
             {
-              "id": "a1",
+              "id": "a",
               "operator": {
-                "type": "number",
-                "operation": "equals"
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
               },
-              "leftValue": "={{ $json.statusCode }}",
-              "rightValue": 200
+              "leftValue": "={{ $json.ok === true }}"
             }
           ]
         },
         "options": {}
       },
-      "id": "c1000000-0000-4000-8000-000000000009",
-      "name": "Agent Available?",
+      "id": "desk-free",
+      "name": "Desk Free?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        120,
-        340
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const lead = $('Verify & Extract').item.json;\nconst agent = $('Checkout CRM Agent').item.json.body.agent;\n\nreturn { json: {\n  agent_id: agent.id,\n  lead,\n  prompt: [\n    'You are ' + agent.name + ', the customer care agent for a Philippine service business.',\n    'Reply to this Facebook Messenger message in warm, natural English.',\n    'Quote prices in PHP. Two or three sentences. Output only the reply text.',\n    '',\n    'Customer message: ' + lead.message,\n    lead.feedback ? '\\nA human reviewer rejected your previous draft.\\nPrevious draft: ' + lead.previous_draft + '\\nFeedback: ' + lead.feedback + '\\nRewrite it.' : '',\n  ].join('\\n'),\n} };"
-      },
-      "id": "c1000000-0000-4000-8000-00000000000a",
-      "name": "Build Prompt",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        340,
-        280
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $env.OLLAMA_URL }}/api/generate",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL || 'llama3.1', prompt: $json.prompt, stream: false }) }}",
-        "options": {
-          "timeout": 120000
-        }
-      },
-      "id": "c1000000-0000-4000-8000-00000000000b",
-      "name": "Ollama Draft",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
         560,
-        280
+        420
       ]
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $env.BACKEND_URL }}/api/internal/approvals",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ agent_id: $('Build Prompt').item.json.agent_id, payload: { type: 'messenger_reply', title: 'Messenger reply to ' + $('Build Prompt').item.json.lead.psid, draft: ($json.response || '').trim(), channel: 'meta_dm', recipient: $('Build Prompt').item.json.lead.psid, account_id: $('Whose Page Is It?').item.json.account_id, account_label: $('Whose Page Is It?').item.json.account_label, source: $('Build Prompt').item.json.lead } }) }}",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/conversations/{{ $('File Inbound').item.json.conversation_id }}",
+        "method": "GET",
         "options": {},
         "sendHeaders": true,
         "headerParameters": {
@@ -307,15 +301,101 @@
           ]
         }
       },
-      "id": "c1000000-0000-4000-8000-00000000000c",
-      "name": "File For Approval",
+      "id": "d1000000-0000-4000-8000-000000000016",
+      "name": "Read The Thread",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
         780,
-        280
+        380
       ],
-      "notes": "The reply is NOT sent yet. It waits on the dashboard; the dispatch workflow sends it."
+      "notes": "The last forty lines, so the draft answers what was actually asked rather than only the newest sentence."
+    },
+    {
+      "parameters": {
+        "jsCode": "// The prompt is built from the skills this desk has switched on, so turning\n// one off in the dashboard really does change what the model is asked to do\n// rather than only what the screen says.\n//\n// It asks for one JSON object rather than loose text, because the answer is\n// not only the reply: it is also whether the desk was sure of it and whether\n// this needs a person. `reply_rules` can let an answer go straight to the\n// buyer, and the only honest way to do that is for the model to say out loud\n// when it was guessing.\nconst checkout = $('Claim The CRM Desk').item.json;\nconst thread = $('Read The Thread').item.json;\nconst skills = (checkout.skills ?? []).map((s) => `- ${s.name}: ${s.summary}`).join('\\n');\nconst history = (thread.messages ?? [])\n  .map((m) => `${m.direction === 'IN' ? 'Buyer' : 'Us'}: ${m.body}`)\n  .join('\\n');\nconst c = thread.conversation ?? {};\nconst agent = checkout.agent ?? {};\nconst money = (n) => `PHP ${Number(n).toLocaleString('en-PH')}`;\n\nconst prompt = [\n  `You are ${agent.name ?? 'the customer care desk'}, ${agent.role_title ?? 'Customer Care'},`,\n  `answering buyers for ${c.account_label ?? 'our shop'} on ${c.channel}.`,\n  '',\n  'What this desk is for:', skills || '- answering buyers politely and accurately',\n  '',\n  'Write the next reply in this conversation.',\n  '',\n  'How to sound:',\n  '- Like a real person on the shop\u2019s team who is glad they wrote.',\n  '- Mirror the buyer\u2019s language exactly: Tagalog gets Tagalog, Taglish gets',\n  '  Taglish, English gets English. Use \"po\" and \"opo\" when they are being formal.',\n  '- Short. Two or three sentences, the way somebody types on a phone.',\n  '- Answer the actual question first, then offer one useful next step.',\n  '- Warm and positive, never pushy, and never a wall of text.',\n  '',\n  'What you must never do:',\n  '- Never invent a price, a stock count, a delivery date, a discount, a voucher',\n  '  or free shipping. Only what is written below is true.',\n  '- Never agree to a refund, a return, a cancellation or a replacement.',\n  '- Never offer to call or ring them: this channel has no voice, only chat.',\n  '- Never say you are an AI, a bot or automated, and never claim to be human',\n  '  either. If they ask who they are talking to, that is for a person.',\n  '- If you do not know, say you will check. Do not guess.',\n  '',\n  'What you actually know:',\n  c.product_name\n    ? `- They seem to be asking about ${c.product_name} (${c.product_sku}).`\n    : '- No particular product is attached to this thread.',\n  c.product_price ? `- Its price is ${money(c.product_price)}.` : '',\n  c.product_stock !== undefined && c.product_stock !== null\n    ? `- Stock on hand right now: ${c.product_stock}.`\n    : '',\n  '',\n  'The conversation so far:',\n  history || 'Buyer: (no message text)',\n  '',\n  'Answer with one JSON object and nothing else, no code fence:',\n  '{\"reply\":\"the message to send\",\"confident\":true,\"needs_human\":false,\"reason\":\"\"}',\n  '',\n  '- confident is false if you had to guess at anything at all.',\n  '- needs_human is true when a person should handle it: a complaint, money',\n  '  going back, a problem with an order, a question about who they are talking',\n  '  to, a price or a date you were not given, or anything you are unsure of.',\n  '- reason is a few words, only when confident is false or needs_human is true.',\n].filter(Boolean).join('\\n');\n\nreturn [{ json: { prompt, conversation_id: c.id, business_id: c.business_id,\n                  agent_id: checkout.agent.id } }];\n"
+      },
+      "id": "d1000000-0000-4000-8000-000000000017",
+      "name": "Build The Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.OLLAMA_URL }}/api/generate",
+        "method": "POST",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OLLAMA_MODEL || \"llama3.1\", prompt: $json.prompt, stream: false }) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000018",
+      "name": "Ask Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1220,
+        380
+      ],
+      "notes": "If Ollama is down this comes back without a response and the next node files nothing, leaving the desk to be released rather than filing an empty draft for someone to approve."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ollama hands back a string, and a model told to answer in JSON will still\n// sometimes wrap it in a sentence or a code fence. So this parses what it can\n// and is deliberately pessimistic about what it cannot: an answer that did not\n// come back in the agreed shape is an answer nobody vouched for, so the text\n// still becomes the draft but it goes to a person rather than to the buyer.\nconst raw = String($json.response ?? '').trim();\nconst built = $('Build The Prompt').item.json;\n\nfunction parse(text) {\n  const start = text.indexOf('{');\n  const end = text.lastIndexOf('}');\n  if (start === -1 || end <= start) return null;\n  try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }\n}\n\nconst parsed = parse(raw);\nconst reply = String(parsed?.reply ?? raw)\n  .replace(/^```(?:json)?/i, '')\n  .replace(/```$/, '')\n  .replace(/^[\"'`]+|[\"'`]+$/g, '')\n  .trim();\n\nreturn [{ json: {\n  conversation_id: built.conversation_id,\n  agent_id: built.agent_id,\n  draft: reply,\n  // No verdict is not a yes.\n  confident: parsed ? parsed.confident === true : false,\n  needs_human: parsed ? parsed.needs_human === true : true,\n  reason: parsed\n    ? String(parsed.reason ?? '').slice(0, 300)\n    : 'the desk did not answer in the agreed format',\n} }];\n"
+      },
+      "id": "read-answer",
+      "name": "Read The Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/internal/conversations/{{ $json.conversation_id }}/draft",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-token",
+              "value": "={{ $env.INTERNAL_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ draft: $json.draft, confident: $json.confident, needs_human: $json.needs_human, reason: $json.reason }) }}"
+      },
+      "id": "d1000000-0000-4000-8000-000000000019",
+      "name": "File The Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1660,
+        380
+      ],
+      "notes": "PENDING. Nothing has reached the buyer; the desk now reads AWAITING_APPROVAL until a human clicks."
     },
     {
       "parameters": {
@@ -328,8 +408,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
       "position": [
-        1000,
-        400
+        1880,
+        480
       ],
       "notes": "Meta retries anything not acknowledged within a few seconds."
     }
@@ -386,86 +466,6 @@
         ]
       ]
     },
-    "A Real Message?": {
-      "main": [
-        [
-          {
-            "node": "Checkout CRM Agent",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Ack Meta",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Checkout CRM Agent": {
-      "main": [
-        [
-          {
-            "node": "Agent Available?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Agent Available?": {
-      "main": [
-        [
-          {
-            "node": "Build Prompt",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Ack Meta",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Prompt": {
-      "main": [
-        [
-          {
-            "node": "Ollama Draft",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Ollama Draft": {
-      "main": [
-        [
-          {
-            "node": "File For Approval",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "File For Approval": {
-      "main": [
-        [
-          {
-            "node": "Ack Meta",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Connected Pages": {
       "main": [
         [
@@ -482,6 +482,119 @@
         [
           {
             "node": "A Real Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A Real Message?": {
+      "main": [
+        [
+          {
+            "node": "File Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ack Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File Inbound": {
+      "main": [
+        [
+          {
+            "node": "Claim The CRM Desk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim The CRM Desk": {
+      "main": [
+        [
+          {
+            "node": "Desk Free?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Desk Free?": {
+      "main": [
+        [
+          {
+            "node": "Read The Thread",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ack Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read The Thread": {
+      "main": [
+        [
+          {
+            "node": "Build The Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build The Prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Ollama": {
+      "main": [
+        [
+          {
+            "node": "Read The Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read The Answer": {
+      "main": [
+        [
+          {
+            "node": "File The Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "File The Draft": {
+      "main": [
+        [
+          {
+            "node": "Ack Meta",
             "type": "main",
             "index": 0
           }

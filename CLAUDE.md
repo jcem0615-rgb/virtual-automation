@@ -1,8 +1,17 @@
 # Virtual Office — project guide for Claude Code
 
 Multi-tenant, self-hosted AI "virtual office". Autonomous agents (one per department per
-business) draft work through n8n + a local Ollama model; nothing reaches a customer until a
-human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`.
+business) draft work through n8n + a local Ollama model, and a human approves it in the
+dashboard before it reaches a customer. The original brief is in `docs/BLUEPRINT.md`.
+
+**The one exception, and read it before changing anything near the inbox.** An owner can
+switch on `reply_rules.auto_reply` for a chat channel, and then the CRM desk answers buyers
+on it without anybody reading the reply first. It is off on every channel until someone
+turns it on, it covers inbox replies and nothing else, and even on it only covers a draft
+that passed the screen in `screenReply()` — everything else still waits in the queue as
+before. So the promise this app makes is no longer "nothing reaches a customer unread"; it
+is "nothing reaches a customer unread unless its owner said so, for that channel, and the
+reply promised nothing". Do not quietly widen that to another kind of outbound work.
 
 ## Layout
 
@@ -35,12 +44,12 @@ human approves it in the dashboard. The original brief is in `docs/BLUEPRINT.md`
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
 | `workflows/workflow_sales_lead.json` | Lead → checkout → Ollama → approval. |
-| `workflows/workflow_messenger_inbound.json` | Meta webhook → CRM agent → approval. |
+| `workflows/workflow_messenger_inbound.json` | Meta webhook → inbox thread → CRM agent → sent or filed. |
 | `workflows/workflow_approval_dispatch.json` | Approved → the real channel sender. |
 | `workflows/workflow_post_sync.json` | Approved post → posts or edits each platform copy. |
 | `workflows/workflow_marketing_post.json` | Marketing writes a promo → approval → the page. |
 | `workflows/workflow_product_sync.json` | Approved listing → Shopee, Lazada, TikTok Shop. |
-| `workflows/workflow_marketplace_chat.json` | Buyer chat in → CRM draft → approval → reply out. |
+| `workflows/workflow_marketplace_chat.json` | Buyer chat in → CRM draft → sent or filed → reply out. |
 | `workflows/workflow_order_sync.json` | Orders, payouts, and the collector's unpaid round. |
 | `workflows/workflow_live_monitor.json` | Basket pinning, the room's numbers, comment claims. |
 | `docker-compose.yml` | postgres, ollama, n8n, backend, frontend on one network. |
@@ -83,7 +92,10 @@ the realtime path depends on triggers.
 2. n8n calls `POST /api/internal/agents/checkout` → agent becomes `WORKING`
    (HTTP 423 if the agent is `PAUSED`, which aborts the run).
    A Facebook or Instagram message takes the same path through
-   `workflow_messenger_inbound.json`, which claims the `CRM` desk instead.
+   `workflow_messenger_inbound.json`, which files the message as an inbox
+   conversation first and then claims the `CRM` desk. A marketplace chat does
+   the same through `workflow_marketplace_chat.json`, so all five chat channels
+   reach the desk by one route and show up in one inbox.
 3. n8n asks Ollama for a draft, then `POST /api/internal/approvals` → row is `PENDING`,
    agent becomes `AWAITING_APPROVAL`.
 4. Postgres triggers `NOTIFY`; `server.js` re-reads the row and emits to Socket.io rooms.
@@ -222,7 +234,35 @@ the realtime path depends on triggers.
   refactor.
 - **Nothing is dispatched without an approval row moving PENDING → APPROVED.** Resolution
   is a single guarded `UPDATE … WHERE status = 'PENDING'`, so double clicks and two
-  reviewers cannot both win.
+  reviewers cannot both win. This holds for an answer the CRM desk sends by itself too:
+  that path writes the same row and makes the same guarded move inside one transaction,
+  with `resolved_by = 'auto'` and no `resolved_by_user_id`, then hands it to the same
+  `dispatchApproval()` a human's click would have used. It is not a second send path —
+  there is one, and the difference is whose name is on the row.
+- **Answering a buyer without a person is a switch, and `reply_rules` is the switch.**
+  Keyed `(business_id, channel)`, provisioned off for all six channels with the desks, and
+  only an `owner` may change it (`AUTO_REPLY_ENABLED` goes in the log with their email).
+  `POST /api/internal/conversations/:id/draft` is the only route that can take that path,
+  and `screenReply()` is the only place that decides. It holds the draft for a person when
+  the switch is off, when the desk reported `needs_human` or `confident: false` (and a
+  workflow that reported neither counts as unsure — no verdict is not a yes), when the
+  buyer's last message used one of `escalate_words`, when the draft itself contains
+  anything from `COMMITS_TO_SOMETHING`, and when the thread already has `max_in_a_row`
+  answers behind it that nobody read. A single word matches on a word boundary so `bot`
+  does not fire on `bother`. Every one of those paths ends with the draft filed exactly as
+  it was before, so the switch adds a fast lane and removes nothing.
+- **A paused desk and a suspended floor still win.** `draft` returns 423 for both, before
+  it writes anything at all — no approval, no message, nothing filed for later. Pausing the
+  CRM desk is the stop button for auto-reply, and it has to stay that way.
+- **An outbound message says who let it out.** `messages.sent_automatically` comes from the
+  approval's own `resolved_by = 'auto'`, read off the row in the send-report route — never
+  from what the workflow claimed. A workflow does not get to say a reply was reviewed. The
+  inbox prints the difference under every outbound line, and the run of them in one thread
+  is what `max_in_a_row` counts back over, stopping at the first one a person sent.
+- **The desk does not lie about being a desk.** The CRM prompt forbids claiming to be an
+  AI *and* claiming to be a human, and `bot`, `robot`, `automated` and `human` are in the
+  default `escalate_words` — so a buyer who asks who they are talking to gets a person
+  rather than an answer from the thing they are asking about. Keep both halves.
 - **PAUSED always wins.** No side effect (approve, reject, retry) may move a paused agent;
   go through `settleAgent()`.
 - **A desk taken off the floor is not deleted.** `approvals.agent_id` is NOT NULL ON DELETE
@@ -421,7 +461,20 @@ deployment change; it is faster than finding out from a customer.
   and neither is attributed.
 - `workflow_approval_dispatch.json` has real Meta and Shopee senders; the email branch is
   still a placeholder node, and a channel it does not route falls through to a no-op. An
-  inbox reply does not come here at all — it goes to `N8N_CHAT_WEBHOOK_URL`.
+  inbox reply does not come here at all — it goes to `N8N_CHAT_WEBHOOK_URL`. Its
+  `messenger_reply` kind is now only reached by rows filed before Messenger moved into the
+  inbox; new ones are `chat_reply`.
+- Auto-reply is screened, not understood. `screenReply()` reads words, not meaning: a
+  buyer who is furious in words none of the lists contain gets an automatic answer, and a
+  reply saying "no discounts po" is held because it contains "discount". The first is the
+  one that matters, and the honest mitigation is `max_in_a_row` plus an owner reading the
+  inbox, not a longer word list. Sentiment would need a second model call per message.
+- Nothing rate-limits auto-reply. A buyer who sends thirty messages gets thirty runs, each
+  one an Ollama call, and `max_in_a_row` only stops the run of *unread* answers in a single
+  thread. A flood across many threads is not capped anywhere.
+- `escalate_words` ships with English and Tagalog, and that is all. A seller whose buyers
+  write Bisaya, Ilocano or Hiligaynon has to add their own words, and nothing in the UI
+  prompts them to — the switches are there, the word list is API-only.
 - Nothing imports the workflows into n8n. `docker-compose.yml` mounts `./workflows` at
   `/workflows` and the README gives the one-line import, but a fresh stack has an empty
   n8n until somebody runs it — and an imported workflow still has to be activated by hand.

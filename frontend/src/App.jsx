@@ -377,6 +377,7 @@ export default function App() {
             <InboxPanel
               businessId={businessId}
               refreshKey={changed}
+              isOwner={isOwnerHere}
               onSignedOut={signedOut}
             />
           </div>

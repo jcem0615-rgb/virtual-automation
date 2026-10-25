@@ -271,6 +271,9 @@ BEGIN
   -- anything, so a new floor gets the defaults with its desks. Defined
   -- further down the file; plpgsql resolves the call when it runs.
   PERFORM provision_payment_rules(p_business_id);
+  -- And a reply rule per channel, all of them with answering by itself
+  -- switched off, so a new floor never answers a buyer unasked.
+  PERFORM provision_reply_rules(p_business_id);
 
   RETURN inserted;
 END;
@@ -751,8 +754,10 @@ CREATE TABLE IF NOT EXISTS messages (
   business_id     uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
   direction       text NOT NULL CHECK (direction IN ('IN','OUT')),
   body            text NOT NULL,
-  -- An outbound line is only ever written here once a human approved it, so
-  -- it carries the approval that let it out.
+  -- An outbound line is only ever written here against an approval that
+  -- reached APPROVED, so it carries the one that let it out. Who moved that
+  -- row is on the approval itself: a reviewer's email, or `auto` when the
+  -- desk answered under `reply_rules`.
   approval_id     uuid REFERENCES approvals(id) ON DELETE SET NULL,
   external_id     text,
   sent_at         timestamptz,
@@ -1155,6 +1160,72 @@ $fn$ LANGUAGE plpgsql;
 
 -- A live claim is never COD: a link that is not paid simply expires.
 UPDATE payment_rules SET allow_cod = false WHERE platform = 'live' AND allow_cod;
+
+-- ------------------------------------------------- answering by itself
+-- Whether the CRM desk may send a buyer its own answer, per business and per
+-- channel, and what always fetches a person instead.
+--
+-- Every other kind of outbound work in this schema waits for a human. This is
+-- the one the seller can switch off that wait for, because a buyer on Shopee
+-- or Messenger expects an answer in seconds and a seller who replies in a day
+-- loses the sale. It is off on every channel until someone turns it on, and
+-- even on, it only covers a draft that passes the screen in `commerce.js`:
+-- anything the model was unsure of, anything carrying a word on the escalate
+-- list, and anything past the run of replies allowed in one thread still
+-- files an approval and waits, exactly as before.
+CREATE TABLE IF NOT EXISTS reply_rules (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  channel     text NOT NULL
+              CHECK (channel IN ('shopee_chat','lazada_chat','tiktok_dm',
+                                 'meta_dm','instagram_dm','email')),
+  -- The switch. Off means every reply on this channel waits for a human,
+  -- which is what the rest of this application does everywhere.
+  auto_reply  boolean NOT NULL DEFAULT false,
+  -- How many answers in a row the desk may send in one thread before it
+  -- stops and asks. A buyer still asking after three goes is a buyer the
+  -- model is not helping, and that is exactly when a person should read it.
+  max_in_a_row int NOT NULL DEFAULT 3 CHECK (max_in_a_row >= 0),
+  -- A buyer writing any of these gets a person, whatever the model thought.
+  -- Money going backwards, a complaint, a threat, and the question that
+  -- deserves an honest answer from someone who can give one.
+  escalate_words text[] NOT NULL DEFAULT ARRAY[
+    'refund','return','cancel','complaint','damaged','broken','wrong item',
+    'scam','fake','lawyer','legal','police','report you','dispute',
+    'chargeback','warranty','bot','robot','automated','human','manager',
+    'reklamo','palit','sauli','bayad ko','hindi dumating','nasaan'
+  ]::text[],
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (business_id, channel)
+);
+
+CREATE OR REPLACE FUNCTION provision_reply_rules(p_business_id uuid)
+RETURNS integer AS $fn$
+DECLARE
+  inserted integer;
+BEGIN
+  INSERT INTO reply_rules (business_id, channel)
+  SELECT p_business_id, v.channel
+    FROM (VALUES ('shopee_chat'), ('lazada_chat'), ('tiktok_dm'),
+                 ('meta_dm'), ('instagram_dm'), ('email')) AS v (channel)
+  ON CONFLICT (business_id, channel) DO NOTHING;
+  GET DIAGNOSTICS inserted = ROW_COUNT;
+  RETURN inserted;
+END;
+$fn$ LANGUAGE plpgsql;
+
+-- Floors that existed before this table did.
+SELECT provision_reply_rules(id) FROM businesses;
+
+DROP TRIGGER IF EXISTS reply_rules_touch ON reply_rules;
+CREATE TRIGGER reply_rules_touch
+  BEFORE UPDATE ON reply_rules
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+-- An outbound message says whether a person let it out or the desk did, so
+-- the inbox can show which is which and a log can be read back later.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sent_automatically boolean NOT NULL DEFAULT false;
 
 CREATE INDEX IF NOT EXISTS payments_business_idx ON payments (business_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS payments_state_idx ON payments (business_id, state);

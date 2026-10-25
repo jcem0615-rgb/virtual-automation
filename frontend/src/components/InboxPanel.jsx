@@ -5,8 +5,15 @@
 // So this panel never offers to ring anybody, and says why once at the top
 // rather than leaving a seller hunting for a call button that cannot exist.
 //
-// A reply is drafted here and filed. It reaches the buyer only after someone
-// has approved it, which is why the composer says "Send for approval".
+// A reply written here is drafted and filed: it reaches the buyer only after
+// someone has approved it, which is why the composer says "Send for approval".
+//
+// The CRM desk's own replies are the one exception in the whole application,
+// and only where an owner has switched it on for that channel — the switches
+// at the top of this panel. Even on, a draft that promises something, that the
+// desk was unsure of, or that answers a buyer who used one of the escalate
+// words still waits in the queue. A reply that did go out by itself is marked
+// as such in the thread, so the two are never confused on screen.
 import { useCallback, useEffect, useState } from 'react';
 import { api, Unauthorized } from './../api.js';
 
@@ -38,7 +45,7 @@ const timeOf = (value) => new Date(value).toLocaleString('en-PH', {
   hour: '2-digit', minute: '2-digit',
 });
 
-export default function InboxPanel({ businessId, refreshKey, onSignedOut }) {
+export default function InboxPanel({ businessId, refreshKey, isOwner, onSignedOut }) {
   const [data, setData] = useState(null);
   const [channel, setChannel] = useState('all');
   const [openId, setOpenId] = useState(null);
@@ -47,10 +54,20 @@ export default function InboxPanel({ businessId, refreshKey, onSignedOut }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [note, setNote] = useState(null);
+  const [rules, setRules] = useState([]);
 
   const load = useCallback(async () => {
     try {
-      setData(await api.inbox(businessId, channel));
+      const [inbox, replyRules] = await Promise.all([
+        api.inbox(businessId, channel),
+        // One floor at a time: a switch that answers buyers is not something
+        // to flip across several businesses at once from one row of chips.
+        businessId && businessId !== 'all'
+          ? api.replyRules(businessId).catch(() => ({ rules: [] }))
+          : Promise.resolve({ rules: [] }),
+      ]);
+      setData(inbox);
+      setRules(replyRules.rules ?? []);
       setError(null);
     } catch (err) {
       if (err instanceof Unauthorized) return onSignedOut();
@@ -99,8 +116,27 @@ export default function InboxPanel({ businessId, refreshKey, onSignedOut }) {
     }
   };
 
+  const toggleAuto = async (rule) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setReplyRule(rule.id, { auto_reply: !rule.auto_reply });
+      setNote(rule.auto_reply
+        ? `${CHANNEL_LABEL[rule.channel] ?? rule.channel}: replies wait for you again.`
+        : `${CHANNEL_LABEL[rule.channel] ?? rule.channel}: the desk will answer buyers`
+          + ' itself. Anything it is unsure of still comes to you.');
+      await load();
+    } catch (err) {
+      if (err instanceof Unauthorized) return onSignedOut();
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const conversations = data?.conversations ?? [];
   const waiting = conversations.filter((c) => c.status === 'OPEN').length;
+  const answering = rules.filter((r) => r.auto_reply);
 
   return (
     <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900">
@@ -145,6 +181,51 @@ export default function InboxPanel({ businessId, refreshKey, onSignedOut }) {
         <p className="border-b border-slate-800 bg-slate-950/60 px-4 py-2 text-[11px] text-slate-500">
           {data.calls.note}
         </p>
+      )}
+
+      {/* Who answers. Off everywhere until an owner says otherwise. */}
+      {rules.length > 0 && (
+        <div className="border-b border-slate-800 px-4 py-3">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <p className="text-xs text-slate-300">Let the desk answer by itself</p>
+            <p className="text-[11px] text-slate-500">
+              {answering.length === 0
+                ? 'off everywhere — every reply waits for you'
+                : `on for ${answering.map((r) => CHANNEL_LABEL[r.channel] ?? r.channel).join(', ')}`}
+            </p>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {rules.map((rule) => (
+              <button
+                key={rule.id}
+                id={`auto-${rule.channel}`}
+                type="button"
+                disabled={!isOwner || busy}
+                title={isOwner
+                  ? 'An owner decides this. Replies the desk is unsure of still wait for you.'
+                  : 'Only an owner can change this.'}
+                onClick={() => toggleAuto(rule)}
+                className={`rounded-full border px-2.5 py-1 text-[11px] ${
+                  rule.auto_reply
+                    ? 'border-emerald-800 bg-emerald-950 text-emerald-300'
+                    : 'border-slate-700 text-slate-500'
+                } ${isOwner ? 'hover:bg-slate-800' : 'cursor-not-allowed opacity-70'}`}
+              >
+                {CHANNEL_LABEL[rule.channel] ?? rule.channel}
+                <span className="ml-1 font-mono opacity-70">
+                  {rule.auto_reply ? 'auto' : 'off'}
+                </span>
+              </button>
+            ))}
+          </div>
+          {answering.length > 0 && (
+            <p className="mt-2 text-[11px] text-amber-300">
+              Replies on those channels go to the buyer without you reading them first.
+              A draft that promises anything, that the desk was unsure of, or that answers
+              a complaint still waits here. Pausing the CRM desk stops all of it.
+            </p>
+          )}
+        </div>
       )}
 
       {error && <p className="px-4 pt-3 text-sm text-red-300">{error}</p>}
@@ -196,6 +277,12 @@ export default function InboxPanel({ businessId, refreshKey, onSignedOut }) {
                         {m.body}
                         <span className="mt-1 block font-mono text-[10px] text-slate-500">
                           {m.direction === 'OUT' && !m.sent_at ? 'not sent' : timeOf(m.created_at)}
+                          {/* Which of the two kinds of outbound line this is. */}
+                          {m.direction === 'OUT' && m.sent_at && (
+                            m.sent_automatically
+                              ? <span className="ml-1 text-emerald-400">· answered by the desk</span>
+                              : <span className="ml-1 text-slate-600">· approved by you</span>
+                          )}
                         </span>
                       </li>
                     ))}

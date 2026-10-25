@@ -142,6 +142,12 @@ export const api = {
   replyToThread: (id, draft) =>
     request(`/api/inbox/${id}/reply`, { method: 'POST', body: JSON.stringify({ draft }) }),
   closeThread: (id) => request(`/api/inbox/${id}/close`, { method: 'POST' }),
+  // Whether the CRM desk may answer a buyer without anybody reading it, per
+  // channel. The only switch in the app that lets something out ungated, so
+  // the route behind it is owner-only.
+  replyRules: (businessId) => request(`/api/reply-rules${scope(businessId)}`),
+  setReplyRule: (id, body) =>
+    request(`/api/reply-rules/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   // Sales.
   orders: (businessId, { status, accountId, source } = {}) => {

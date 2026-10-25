@@ -27,6 +27,85 @@ export const CHANNELS = [
   'shopee_chat', 'lazada_chat', 'tiktok_dm', 'meta_dm', 'instagram_dm', 'email',
 ];
 
+/**
+ * Phrases in a draft that commit the seller to something.
+ *
+ * Blunt on purpose, and it errs one way: a reply that merely mentions one of
+ * these goes to a person even when it was going to be fine. The cost of that
+ * is a seller reading one more message; the cost of the other mistake is a
+ * refund the desk promised on its own, to a real buyer, in the seller's name.
+ */
+const COMMITS_TO_SOMETHING = [
+  'refund', 'reimburse', 'money back', 'cancel your order', 'cancel the order',
+  'discount', 'promo code', 'voucher', 'free shipping', 'free delivery',
+  'guarantee', 'guaranteed', 'warranty', 'replacement', 'i promise',
+  'we promise', 'will arrive on', 'will be delivered on', 'same day',
+  'diskwento', 'bawas', 'libre', 'palitan', 'sauli',
+];
+
+/**
+ * Does this text mention any of these?
+ *
+ * A single word has to match as a word — `bot` must not fire on `bother`, and
+ * `return` must not fire on `returning` — while an entry with a space in it is
+ * a phrase and matches plainly.
+ */
+export function mentions(text, words) {
+  const haystack = String(text ?? '').toLowerCase();
+  for (const word of words ?? []) {
+    const needle = String(word).toLowerCase().trim();
+    if (!needle) continue;
+    if (needle.includes(' ')) {
+      if (haystack.includes(needle)) return needle;
+      continue;
+    }
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\b${escaped}\\b`, 'i').test(haystack)) return needle;
+  }
+  return null;
+}
+
+/**
+ * May the desk send this answer itself, or does a person have to read it?
+ *
+ * The one place that decides, and it decides on the rule the owner set plus
+ * what is actually in front of it — not on how the workflow felt about its
+ * own draft. Every path out of here that is not `auto` ends with the draft
+ * filed as an approval exactly as before, so turning the switch on adds a
+ * fast path and removes nothing.
+ *
+ * Order matters only in that the first reason found is the one reported; any
+ * single failure is enough to want a human.
+ */
+export function screenReply({ rule, draft, verdict = {}, buyerSaid, autoInARow = 0 }) {
+  const hold = (why) => ({ auto: false, why });
+
+  if (!rule || rule.auto_reply !== true) {
+    return hold('answering without a person is switched off for this channel');
+  }
+  const text = String(draft ?? '').trim();
+  if (text.length < 2) return hold('there is no answer to send');
+  if (text.length > 1200) {
+    // A chat reply this long is an essay, and an essay is the model losing
+    // the thread rather than answering a question.
+    return hold('the answer is too long to send unread');
+  }
+  if (verdict.needs_human === true) {
+    return hold(`the desk asked for a person${verdict.reason ? `: ${verdict.reason}` : ''}`);
+  }
+  if (verdict.confident === false) {
+    return hold(`the desk was not sure of its answer${verdict.reason ? `: ${verdict.reason}` : ''}`);
+  }
+  const asked = mentions(buyerSaid, rule.escalate_words);
+  if (asked) return hold(`the buyer said "${asked}"`);
+  const promised = mentions(text, COMMITS_TO_SOMETHING);
+  if (promised) return hold(`the answer commits to something ("${promised}")`);
+  if (autoInARow >= Number(rule.max_in_a_row ?? 0)) {
+    return hold(`this thread has had ${autoInARow} answers in a row with nobody reading them`);
+  }
+  return { auto: true, why: 'the rule allows it and the answer promises nothing' };
+}
+
 // Which connected platform a channel belongs to, for picking the account and
 // the credentials a reply has to go out on.
 export const CHANNEL_PLATFORM = {
@@ -65,6 +144,7 @@ export function registerCommerce(app, ctx) {
     q, tx, wrap, HttpError, assertUuid, businessClause, scopeFor, requireOwner,
     assertInScope, logAction, settleAgent, deskFor, requireUser,
     registerApprovalType, chatWebhookUrl, orderSyncWebhookUrl, internalGate,
+    dispatchApproval,
   } = ctx;
 
   // ------------------------------------------------------------- readers
@@ -75,6 +155,8 @@ export function registerCommerce(app, ctx) {
     c.last_message_at, c.unread, c.created_at,
     acc.label AS account_label, acc.platform AS account_platform,
     p.name AS product_name, p.sku AS product_sku,
+    p.price AS product_price, p.currency AS product_currency,
+    p.stock AS product_stock,
     (SELECT m.body FROM messages m
       WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) AS last_body,
     (SELECT m.direction FROM messages m
@@ -118,7 +200,8 @@ export function registerCommerce(app, ctx) {
 
   async function readMessages(conversationId, limit = 200) {
     const { rows } = await q(
-      `SELECT id, direction, body, approval_id, external_id, sent_at, created_at
+      `SELECT id, direction, body, approval_id, external_id, sent_at,
+              sent_automatically, created_at
          FROM messages WHERE conversation_id = $1
         ORDER BY created_at LIMIT $2`,
       [conversationId, Math.min(Number(limit) || 200, 500)],
@@ -277,6 +360,7 @@ export function registerCommerce(app, ctx) {
   app.use('/api/payments', requireUser);
   app.use('/api/payouts', requireUser);
   app.use('/api/payment-rules', requireUser);
+  app.use('/api/reply-rules', requireUser);
 
   app.get('/api/inbox', wrap(async (req, res) => {
     const scope = scopeFor(req.user, req.query.business_id);
@@ -576,6 +660,78 @@ export function registerCommerce(app, ctx) {
     res.json({ rules: rows });
   }));
 
+  // -------------------------------------------------------- reply rules
+
+  app.get('/api/reply-rules', wrap(async (req, res) => {
+    const scope = scopeFor(req.user, req.query.business_id);
+    const where = businessClause(scope, { column: 'business_id' });
+    const { rows } = await q(
+      `SELECT * FROM reply_rules WHERE ${where.sql} ORDER BY business_id, channel`,
+      where.params);
+    res.json({ channels: CHANNELS, rules: rows });
+  }));
+
+  /**
+   * Switch answering-by-itself on or off for one channel.
+   *
+   * This is the only setting in the application that lets something reach a
+   * customer without a person reading it first, so it is an owner's decision
+   * and it is written to the log with their name on it. A reviewer approves
+   * drafts; deciding that drafts need no approving is not the same job.
+   */
+  app.patch('/api/reply-rules/:id', wrap(async (req, res) => {
+    const id = assertUuid(req.params.id, 'rule_id');
+    const { rows: found } = await q(`SELECT * FROM reply_rules WHERE id = $1`, [id]);
+    const rule = found[0];
+    if (!rule) throw new HttpError(404, 'rule not found');
+    assertInScope(req.user, rule.business_id);
+    requireOwner(req.user, rule.business_id);
+
+    const patch = {};
+    const body = req.body ?? {};
+    if ('auto_reply' in body) patch.auto_reply = Boolean(body.auto_reply);
+    if ('max_in_a_row' in body) {
+      const n = Math.round(Number(body.max_in_a_row));
+      if (!Number.isFinite(n) || n < 0 || n > 20) {
+        throw new HttpError(400, 'max_in_a_row must be between 0 and 20');
+      }
+      patch.max_in_a_row = n;
+    }
+    if ('escalate_words' in body) {
+      if (!Array.isArray(body.escalate_words)) {
+        throw new HttpError(400, 'escalate_words must be a list of words');
+      }
+      const words = body.escalate_words
+        .map((w) => String(w).toLowerCase().trim())
+        .filter(Boolean);
+      if (words.length > 120) throw new HttpError(400, 'that is too many words to watch for');
+      if (words.some((w) => w.length > 60)) throw new HttpError(400, 'one of those is not a word');
+      patch.escalate_words = [...new Set(words)];
+    }
+    if (!Object.keys(patch).length) throw new HttpError(400, 'nothing to change');
+
+    const keys = Object.keys(patch);
+    const sets = keys.map((k, i) => `${k} = $${i + 3}`).join(', ');
+    const updated = await tx(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE reply_rules SET ${sets}
+          WHERE id = $1 AND business_id = ANY($2::uuid[]) RETURNING *`,
+        [id, req.user.businessIds, ...keys.map((k) => patch[k])],
+      );
+      if (!rows[0]) throw new HttpError(404, 'rule not found');
+      await logAction(client, {
+        businessId: rule.business_id,
+        action: patch.auto_reply === true ? 'AUTO_REPLY_ENABLED'
+          : (patch.auto_reply === false ? 'AUTO_REPLY_DISABLED' : 'REPLY_RULE_CHANGED'),
+        actor: req.user.email,
+        actorUserId: req.user.id,
+        detail: { channel: rule.channel, ...patch },
+      });
+      return rows[0];
+    });
+    res.json({ ok: true, rule: updated });
+  }));
+
   // Changing a payment rule changes what goes out unpaid and when stock
   // leaves, so it is an owner's decision.
   app.patch('/api/payment-rules/:id', wrap(async (req, res) => {
@@ -656,7 +812,15 @@ export function registerCommerce(app, ctx) {
   // a replay does not open a second conversation for the same chat.
   app.post('/api/internal/conversations', wrap(async (req, res) => {
     const body = req.body ?? {};
-    const businessId = assertUuid(body.business_id, 'business_id');
+    const asked = body.business_id ? assertUuid(body.business_id, 'business_id') : null;
+    const code = body.business_code ? String(body.business_code) : null;
+    if (!asked && !code) throw new HttpError(400, 'business_id or business_code is required');
+    const { rows: floors } = await q(
+      `SELECT id FROM businesses
+        WHERE ($1::uuid IS NULL OR id = $1::uuid)
+          AND ($2::text IS NULL OR code = $2::text)`, [asked, code]);
+    if (!floors[0]) throw new HttpError(404, 'business not found');
+    const businessId = floors[0].id;
     const channel = String(body.channel ?? '');
     if (!CHANNELS.includes(channel)) throw new HttpError(400, 'unknown channel');
     const text = String(body.body ?? '').trim();
@@ -709,9 +873,182 @@ export function registerCommerce(app, ctx) {
     res.status(201).json({ ok: true, conversation_id: out.id });
   }));
 
-  // The reply actually went out. Written here and only here, carrying the
-  // approval that let it: an OUT message with no approval_id would mean
-  // something reached a customer without a human, so it cannot be written.
+  /**
+   * The CRM desk hands in an answer it has written.
+   *
+   * One route, two outcomes, and the rule the owner set decides which:
+   *
+   *   - filed, as it always was — an approval goes PENDING, the thread reads
+   *     AWAITING_APPROVAL, the desk waits, and a person sends it;
+   *   - sent, when `reply_rules` allows it and the answer passes the screen —
+   *     the same approval row is written and moved to APPROVED in the same
+   *     transaction with `auto` on it, and then handed to the same dispatch a
+   *     human's Approve would have used.
+   *
+   * The second one is not a second send path. It is the first one with nobody
+   * in the chair, which is why the approval row, the action log and the
+   * message's `approval_id` all still exist to read back afterwards.
+   */
+  app.post('/api/internal/conversations/:id/draft', wrap(async (req, res) => {
+    const conversationId = assertUuid(req.params.id, 'conversation_id');
+    const body = req.body ?? {};
+    const draft = String(body.draft ?? '').trim();
+    if (!draft) throw new HttpError(400, 'a draft needs something in it');
+    if (draft.length > 4000) throw new HttpError(400, 'that reply is too long for a chat');
+
+    const conversation = await readConversation(conversationId);
+    if (!conversation) throw new HttpError(404, 'conversation not found');
+    const closed = await internalGate(conversation.business_id);
+    if (closed) { res.status(423).json(closed); return; }
+
+    // What the desk said about its own answer. Anything missing or unparsed
+    // counts as "ask a person" — a workflow that fails to say it was sure is
+    // not the same as a workflow that said it was.
+    const verdict = {
+      confident: body.confident === true,
+      needs_human: body.needs_human === true,
+      reason: body.reason ? String(body.reason).slice(0, 300) : null,
+    };
+
+    const [{ rows: desks }, { rows: rules }, { rows: lastIn }, { rows: outs }] =
+      await Promise.all([
+        q(`SELECT id, status, removed_at FROM agents
+            WHERE business_id = $1 AND department = 'CRM'`, [conversation.business_id]),
+        q(`SELECT * FROM reply_rules WHERE business_id = $1 AND channel = $2`,
+          [conversation.business_id, conversation.channel]),
+        q(`SELECT body FROM messages WHERE conversation_id = $1 AND direction = 'IN'
+            ORDER BY created_at DESC LIMIT 1`, [conversationId]),
+        q(`SELECT sent_automatically FROM messages
+            WHERE conversation_id = $1 AND direction = 'OUT'
+            ORDER BY created_at DESC LIMIT 20`, [conversationId]),
+      ]);
+
+    const desk = desks[0];
+    if (!desk || desk.removed_at) throw new HttpError(404, 'this floor has no CRM desk');
+    if (desk.status === 'PAUSED') {
+      // PAUSED wins over the rule, as it wins over everything else.
+      res.status(423).json({ ok: false, status: 'PAUSED',
+        error: 'the CRM desk is paused — nothing filed and nothing sent' });
+      return;
+    }
+
+    // How many answers this thread has had in a row that nobody read. Counted
+    // back from the newest, stopping at the first one a person sent.
+    let autoInARow = 0;
+    for (const row of outs) {
+      if (row.sent_automatically !== true) break;
+      autoInARow += 1;
+    }
+
+    const decision = screenReply({
+      rule: rules[0],
+      draft,
+      verdict,
+      buyerSaid: lastIn[0]?.body ?? '',
+      autoInARow,
+    });
+
+    const filed = await tx(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO approvals (business_id, agent_id, payload_json)
+         VALUES ($1, $2, $3::jsonb)
+         RETURNING id, business_id, agent_id, status, payload_json, created_at`,
+        [conversation.business_id, desk.id, JSON.stringify({
+          type: 'chat_reply',
+          title: `Reply to ${conversation.buyer_name} on ${conversation.channel}`,
+          draft,
+          channel: conversation.channel,
+          recipient: conversation.buyer_handle ?? conversation.buyer_name,
+          conversation_id: conversation.id,
+          account_id: conversation.account_id,
+          // Why it went out by itself, or why it did not. On screen this is
+          // the line that tells a seller what their rule actually did.
+          auto: decision.auto,
+          auto_reason: decision.why,
+          source: { conversation_id: conversation.id, drafted_by: 'the CRM desk' },
+        })],
+      );
+      const approval = rows[0];
+      await logAction(client, {
+        businessId: conversation.business_id,
+        agentId: desk.id,
+        approvalId: approval.id,
+        action: 'CHAT_REPLY_SUBMITTED',
+        actor: 'n8n',
+        detail: { channel: conversation.channel, conversation_id: conversation.id,
+          auto: decision.auto, reason: decision.why },
+      });
+
+      if (!decision.auto) {
+        await client.query(
+          `UPDATE conversations SET status = 'AWAITING_APPROVAL' WHERE id = $1`,
+          [conversation.id]);
+        await settleAgent(client, {
+          agentId: desk.id,
+          businessId: conversation.business_id,
+          status: 'AWAITING_APPROVAL',
+          message: `Reply waiting: ${conversation.buyer_name}`.slice(0, 500),
+        });
+        return { approval, auto: false };
+      }
+
+      // The same guarded move a reviewer's click makes, so a draft that was
+      // somehow already resolved cannot be sent twice.
+      const { rows: moved } = await client.query(
+        `UPDATE approvals
+            SET status = 'APPROVED', resolved_at = now(), resolved_by = 'auto'
+          WHERE id = $1 AND status = 'PENDING'
+          RETURNING id, business_id, agent_id, payload_json`,
+        [approval.id]);
+      if (!moved[0]) return { approval, auto: false };
+
+      await logAction(client, {
+        businessId: conversation.business_id,
+        agentId: desk.id,
+        approvalId: approval.id,
+        action: 'APPROVE_TASK',
+        actor: 'auto',
+        detail: { channel: conversation.channel, auto: true, reason: decision.why },
+      });
+      // The desk is mid-job until the send reports back, and the thread is
+      // not AWAITING_APPROVAL because nothing is waiting on anybody.
+      await settleAgent(client, {
+        agentId: desk.id,
+        businessId: conversation.business_id,
+        status: 'WORKING',
+        message: `Answering ${conversation.buyer_name}`.slice(0, 500),
+      });
+      return { approval: moved[0], auto: true };
+    });
+
+    if (!filed.auto) {
+      res.status(201).json({ ok: true, auto: false, approval_id: filed.approval.id,
+        why: decision.why });
+      return;
+    }
+
+    const dispatch = await dispatchApproval(filed.approval);
+    if (!dispatch.ok) {
+      // Nobody took the job, so the buyer is getting nothing and the desk
+      // must not be left mid-answer. The thread is put back by the kind's
+      // own onDispatchFailed; this is the desk.
+      await tx((client) => settleAgent(client, {
+        agentId: desk.id,
+        businessId: conversation.business_id,
+        status: 'IDLE',
+        message: 'Reply could not be queued',
+      }));
+    }
+    res.status(201).json({ ok: true, auto: true, approval_id: filed.approval.id,
+      why: decision.why, dispatch });
+  }));
+
+  // The reply actually went out. Written here and only here, against the
+  // approval that let it: an OUT message with no approval behind it would mean
+  // something reached a customer through no gate at all, so it cannot be
+  // written. Whether a person or the desk moved that approval is read off the
+  // row rather than taken from the caller — a workflow does not get to say a
+  // reply was reviewed.
   app.post('/api/internal/conversations/:id/messages', wrap(async (req, res) => {
     const conversationId = assertUuid(req.params.id, 'conversation_id');
     const body = req.body ?? {};
@@ -720,7 +1057,8 @@ export function registerCommerce(app, ctx) {
     if (!text) throw new HttpError(400, 'a sent message needs a body');
 
     const { rows: checked } = await q(
-      `SELECT c.id, c.business_id, a.status AS approval_status
+      `SELECT c.id, c.business_id, a.status AS approval_status,
+              a.resolved_by, a.resolved_by_user_id
          FROM conversations c
          JOIN approvals a ON a.id = $2 AND a.business_id = c.business_id
         WHERE c.id = $1`,
@@ -736,12 +1074,17 @@ export function registerCommerce(app, ctx) {
       : (body.sent_at ? new Date(body.sent_at) : new Date());
 
     await tx(async (client) => {
+      // `auto` on the approval and no user behind it is the desk having sent
+      // this one. The inbox shows that, and the run of them in one thread is
+      // what `max_in_a_row` counts.
+      const byItself = row.resolved_by === 'auto' && !row.resolved_by_user_id;
       await client.query(
         `INSERT INTO messages
-           (conversation_id, business_id, direction, body, approval_id, external_id, sent_at)
-         VALUES ($1, $2, 'OUT', $3, $4, $5, $6)`,
+           (conversation_id, business_id, direction, body, approval_id, external_id,
+            sent_at, sent_automatically)
+         VALUES ($1, $2, 'OUT', $3, $4, $5, $6, $7)`,
         [conversationId, row.business_id, text.slice(0, 8000), approvalId,
-         body.external_id ?? null, sent]);
+         body.external_id ?? null, sent, byItself]);
       await client.query(
         `UPDATE conversations SET status = $2, last_message_at = now() WHERE id = $1`,
         [conversationId, body.failed ? 'OPEN' : 'ANSWERED']);
@@ -755,7 +1098,8 @@ export function registerCommerce(app, ctx) {
         approvalId,
         action: body.failed ? 'MESSAGE_SEND_FAILED' : 'MESSAGE_SENT',
         actor: 'n8n',
-        detail: { conversation_id: conversationId, error: body.error ?? null },
+        detail: { conversation_id: conversationId, error: body.error ?? null,
+          auto: byItself },
       });
     });
 
