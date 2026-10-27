@@ -5,12 +5,25 @@ const BASE = import.meta.env.VITE_API_BASE ?? '';
 // Raised when the session is gone, so App can drop straight back to sign-in.
 export class Unauthorized extends Error {}
 
+// Raised when the backend was not reachable at all — a different thing from
+// the backend saying no, and worth saying differently. A dashboard deployed
+// before its API exists hits this on the sign-in form, and "Failed to fetch"
+// tells the person nothing about what to do next.
+export class Unreachable extends Error {}
+
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    credentials: 'include',   // the session cookie
-    headers: { 'content-type': 'application/json' },
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      credentials: 'include',   // the session cookie
+      headers: { 'content-type': 'application/json' },
+      ...options,
+    });
+  } catch {
+    throw new Unreachable('Cannot reach the Virtual Office API.'
+      + ' The dashboard is up but its backend is not answering —'
+      + ' check that it is running and that this site proxies /api to it.');
+  }
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
   if (!res.ok) {

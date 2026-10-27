@@ -83,6 +83,53 @@ marketplace will refuse, a shop whose credentials will not decrypt, a webhook
 nobody set, workflows imported but never activated. It changes nothing and
 exits non-zero when something would genuinely break.
 
+## Putting the dashboard on Vercel
+
+Vercel can host the **dashboard**. It cannot host the rest of this app, and that is not a
+configuration problem: `backend/server.js` holds a Socket.io server and a Postgres
+`LISTEN` connection open for the life of the process, and n8n and Ollama are long-running
+servers of their own. Serverless functions are request-scoped, so none of that fits. The
+API, Postgres, n8n and Ollama need a real host — `docker-compose.prod.yml` is built for
+exactly that and already keeps everything but the dashboard off the public network.
+
+So the split is: Vercel serves the static dashboard, and `frontend/vercel.json` rewrites
+`/api`, `/uploads` and `/socket.io` to your API host. That keeps both on **one origin** as
+far as the browser is concerned, which matters twice — the session cookie is
+`SameSite=Lax` and would not be sent cross-site, and `OAUTH_REDIRECT_BASE` has to be the
+dashboard's own origin or every marketplace callback arrives signed out.
+
+**1. Import the repo.** On vercel.com: *Add New → Project*, import
+`jcem0615-rgb/virtual-automation`, and set **Root Directory** to `frontend`. Leave the
+build settings alone — `frontend/vercel.json` already sets the framework, the build command
+and the output directory. Deploy.
+
+At this point the dashboard is up and the sign-in form will say it cannot reach the API,
+because the rewrites still point at `backend.invalid` (a reserved name that can never
+resolve, so it fails immediately instead of hanging or reaching a stranger's server).
+
+**2. Point it at your API.** In `frontend/vercel.json`, replace the three
+`https://backend.invalid` with your API's origin, commit, and push — Vercel redeploys on
+push once the repo is connected.
+
+**3. Tell the backend where it lives.** On the API host:
+
+```bash
+PUBLIC_URL=https://your-project.vercel.app          # uploaded photos are served on this
+OAUTH_REDIRECT_BASE=https://your-project.vercel.app # marketplace callbacks land here
+COOKIE_SECURE=true
+TRUST_PROXY=1                                       # so Express sees https behind Vercel
+```
+
+You do **not** need `CORS_ORIGIN`: the rewrites keep it same-origin, which is the whole
+point of doing it this way.
+
+**One caveat that does not go away.** Vercel's rewrites do not carry a WebSocket upgrade,
+so the realtime approval queue falls back to HTTP long-polling. It works — Socket.io
+negotiates it by itself — but it is not a socket, and on a busy floor you will feel it.
+Serving the dashboard from the same host as the API, which the nginx in
+`docker-compose.prod.yml` already does, avoids the problem entirely and is the simpler
+deployment. Vercel is worth it if you specifically want the CDN and the free TLS.
+
 ## Deploying it online
 
 ```bash

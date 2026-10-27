@@ -1,0 +1,60 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+
+  "//": [
+    "Vercel hosts the dashboard. It cannot host the rest of this app: the API",
+    "holds a Socket.io server and a Postgres LISTEN connection open, and n8n",
+    "and Ollama are long-running servers of their own. All of that needs a",
+    "real host; docker-compose.prod.yml is built for one.",
+    "",
+    "So these rewrites point /api, /uploads and /socket.io at that host, which",
+    "keeps the dashboard and the API on ONE origin as far as the browser is",
+    "concerned. That matters twice: the session cookie is SameSite=Lax and",
+    "would not be sent cross-site, and OAUTH_REDIRECT_BASE has to be the",
+    "dashboard's own origin or every marketplace callback arrives signed out.",
+    "",
+    "TO FINISH THIS: replace backend.invalid below with your API host, set",
+    "PUBLIC_URL and OAUTH_REDIRECT_BASE on the backend to this Vercel URL, and",
+    "redeploy. `.invalid` is reserved and can never resolve, so until then the",
+    "dashboard fails fast and says so rather than hanging or reaching a",
+    "stranger's server.",
+    "",
+    "One caveat that does not go away: Vercel's rewrites do not carry a",
+    "WebSocket upgrade, so the realtime queue falls back to HTTP polling. It",
+    "works, it is just not a socket. Serving the dashboard from the same host",
+    "as the API (the nginx in docker-compose.prod.yml already does) avoids it.",
+    "",
+    "The last rewrite is the single-page fallback and has to stay last. Vercel",
+    "checks the filesystem before it applies rewrites, so index.html, assets/,",
+    "sw.js, manifest.webmanifest and the icons are served as themselves and",
+    "only a path with no file behind it reaches it. Listing those exceptions",
+    "by hand would be one more place to forget an icon."
+  ],
+
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://backend.invalid/api/:path*" },
+    { "source": "/uploads/:path*", "destination": "https://backend.invalid/uploads/:path*" },
+    { "source": "/socket.io/:path*", "destination": "https://backend.invalid/socket.io/:path*" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+
+  "headers": [
+    {
+      "source": "/sw.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "X-Frame-Options", "value": "DENY" }
+      ]
+    }
+  ]
+}
