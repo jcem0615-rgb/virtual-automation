@@ -1,6 +1,6 @@
 // The trades a floor can be opened for.
 //
-// Every office gets the same ten desks, the same skills and the same rules —
+// Every office gets the same eleven desks, the same skills and the same rules —
 // what changes with the line of business is what those desks are *called*, so
 // a salon's floor does not read like an electrical contractor's. That is the
 // whole difference: same features and logic, different business line and its
@@ -17,6 +17,7 @@ const BASE_TITLES = {
   Admin: 'Admin Agent',
   HR: 'People Agent',
   Security: 'Security Agent',
+  Secretary: 'Secretary',
 };
 
 export const BUSINESS_LINES = [
@@ -57,6 +58,7 @@ export const BUSINESS_LINES = [
     label: 'Construction',
     blurb: 'Projects, materials and crews on several sites.',
     titles: {
+      Secretary: 'Site Clerk',
       Sales: 'Bidding Agent', Production: 'Site Agent',
       Inventory: 'Materials Agent', Logistics: 'Haulage Agent',
       Security: 'Safety Officer', Admin: 'Permits Agent',
@@ -118,6 +120,7 @@ export const BUSINESS_LINES = [
     label: 'Clinic and dental',
     blurb: 'Appointments, recalls and records that stay private.',
     titles: {
+      Secretary: 'Records Clerk',
       Sales: 'Scheduling Agent', CRM: 'Patient Care Agent',
       Production: 'Clinical Agent', Inventory: 'Supplies Agent',
       Payments: 'Billing Agent', Security: 'Records Agent',
@@ -129,6 +132,7 @@ export const BUSINESS_LINES = [
     label: 'Pharmacy and medical supply',
     blurb: 'Stock with expiry dates and rules about what may be sold.',
     titles: {
+      Secretary: 'Records Clerk',
       Sales: 'Counter Agent', Inventory: 'Stock and Expiry Agent',
       Production: 'Dispensing Agent', Security: 'Compliance Agent',
       Logistics: 'Delivery Agent', Admin: 'Licensing Agent',
@@ -139,6 +143,7 @@ export const BUSINESS_LINES = [
     label: 'Tutorial and review centre',
     blurb: 'Enrolments, schedules and a tutor for every slot.',
     titles: {
+      Secretary: 'Registrar',
       Sales: 'Enrolment Agent', Marketing: 'Outreach Agent',
       Production: 'Scheduling Agent', CRM: 'Parent Liaison Agent',
       Inventory: 'Materials Agent', Payments: 'Tuition Agent',
@@ -150,6 +155,7 @@ export const BUSINESS_LINES = [
     label: 'Events and catering',
     blurb: 'Dates, packages, suppliers and a van that has to be loaded.',
     titles: {
+      Secretary: 'Coordinator',
       Sales: 'Bookings Agent', Production: 'Event Agent',
       Inventory: 'Equipment Agent', Logistics: 'Setup Agent',
       HR: 'Crew Agent', Payments: 'Deposits Agent',
@@ -200,6 +206,7 @@ export const BUSINESS_LINES = [
     label: 'Logistics and delivery',
     blurb: 'Bookings, routes and proof of delivery.',
     titles: {
+      Secretary: 'Records Clerk',
       Sales: 'Booking Agent', Logistics: 'Routing Agent',
       Production: 'Hub Agent', Inventory: 'Fleet Agent',
       Payments: 'Freight Billing Agent',
@@ -220,6 +227,7 @@ export const BUSINESS_LINES = [
     label: 'Real estate and rentals',
     blurb: 'Listings, viewings, tenants and the rent that is due.',
     titles: {
+      Secretary: 'Documents Clerk',
       Sales: 'Listings Agent', Marketing: 'Listings Marketing Agent',
       CRM: 'Viewings Agent', Production: 'Property Agent',
       Payments: 'Rent Collection Agent', Admin: 'Contracts Agent',
@@ -301,6 +309,7 @@ export const BUSINESS_LINES = [
     label: 'Professional services',
     blurb: 'Billable work sold by the engagement.',
     titles: {
+      Secretary: 'Executive Assistant',
       Sales: 'Business Development Agent', Production: 'Delivery Agent',
       Payments: 'Billing Agent', Admin: 'Engagement Admin',
       Inventory: 'Resourcing Agent',

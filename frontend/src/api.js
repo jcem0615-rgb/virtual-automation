@@ -158,6 +158,20 @@ export const api = {
   // Whether the CRM desk may answer a buyer without anybody reading it, per
   // channel. The only switch in the app that lets something out ungated, so
   // the route behind it is owner-only.
+  // The Secretary desk's book. Nothing here is outbound, so there is no
+  // publish, no approval and no dispatch — writing it is the whole action.
+  notes: (businessId, { kind = 'all', q: term } = {}) => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (kind && kind !== 'all') params.set('kind', kind);
+    if (term) params.set('q', term);
+    return request(`/api/notes?${params}`);
+  },
+  writeNote: (body) =>
+    request('/api/notes', { method: 'POST', body: JSON.stringify(body) }),
+  editNote: (id, body) =>
+    request(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteNote: (id) => request(`/api/notes/${id}`, { method: 'DELETE' }),
   replyRules: (businessId) => request(`/api/reply-rules${scope(businessId)}`),
   setReplyRule: (id, body) =>
     request(`/api/reply-rules/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),

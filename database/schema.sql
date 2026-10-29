@@ -232,7 +232,8 @@ AS $fn$
     ('Production', 'Operations Agent',   'staff_orange', 336, 560),
     ('Admin',      'Admin Agent',        'staff_slate',  548, 560),
     ('HR',         'People Agent',       'staff_violet', 760, 560),
-    ('Security',   'Security Agent',     'staff_red',    972, 560)
+    ('Security',   'Security Agent',     'staff_red',    972, 560),
+    ('Secretary',  'Secretary',          'staff_cyan',   575, 200)
 $fn$ LANGUAGE sql IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION provision_business_agents(p_business_id uuid)
@@ -412,6 +413,25 @@ ON CONFLICT (department, skill_key) DO UPDATE
 -- about chairs and no-shows and a haulier's is asked about lanes and
 -- backloads — the same desk, a different job. Adding a trade skill is a row
 -- here, not a code change.
+INSERT INTO skill_catalogue (department, skill_key, name, summary, sort) VALUES
+  -- Secretary. Everything here is about remembering, not about sending.
+  ('Secretary','daily_record','Daily record',
+   'Writes down what the floor actually did today — what was approved, what sold, what nobody answered.',1),
+  ('Secretary','meeting_minutes','Meeting minutes',
+   'Turns a conversation into the three lines worth keeping: what was agreed, by whom, by when.',2),
+  ('Secretary','supplier_notes','Supplier and price notes',
+   'Keeps what a supplier said about stock, lead times and a price going up, with the date they said it.',3),
+  ('Secretary','customer_memory','Customer memory',
+   'Remembers the buyer who always asks for a discount and the one who pays on time, so nobody has to.',4),
+  ('Secretary','handover','Shift handover',
+   'Leaves the next person the short version: what is half-finished and what is waiting on somebody.',5),
+  ('Secretary','document_filing','Document filing',
+   'Says where the permit, the receipt and the signed quote actually are.',6),
+  ('Secretary','reminders','Deadlines and renewals',
+   'Keeps the dates that cost money when missed — permits, registrations, a contract ending.',7)
+ON CONFLICT (department, skill_key) DO UPDATE
+  SET name = EXCLUDED.name, summary = EXCLUDED.summary, sort = EXCLUDED.sort;
+
 INSERT INTO skill_catalogue (department, skill_key, name, summary, business_types, sort) VALUES
   -- Booking a slot, where the slot is the product.
   ('Sales','slot_booking','Slot booking',
@@ -1226,6 +1246,66 @@ CREATE TRIGGER reply_rules_touch
 -- An outbound message says whether a person let it out or the desk did, so
 -- the inbox can show which is which and a log can be read back later.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS sent_automatically boolean NOT NULL DEFAULT false;
+
+-- --------------------------------------------------------- what was noted
+-- The Secretary desk's book: what happened, what was agreed, what somebody
+-- wants remembered. `action_logs` already records every state change this
+-- application makes, which is a different thing — it says a draft was
+-- approved at 14:02, not that the supplier rang to say prices go up in March.
+--
+-- These never leave the building. Every other kind of work in this schema is
+-- on its way to a customer and goes through the approval gate for that
+-- reason; a note is for the people who run the business, so it is written
+-- straight away. Do not put a gate in front of it and do not let one out: a
+-- note is not a channel.
+CREATE TABLE IF NOT EXISTS business_notes (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  -- Whose desk it is filed under. The Secretary writes most of them, but a
+  -- note about an order belongs with Payments, so this is not fixed.
+  -- ON DELETE SET NULL, because taking a desk off the floor must not take
+  -- the business's records with it.
+  agent_id    uuid REFERENCES agents(id) ON DELETE SET NULL,
+  kind        text NOT NULL DEFAULT 'note'
+              CHECK (kind IN ('note','minute','handover','daily')),
+  subject     text NOT NULL,
+  body        text NOT NULL,
+  -- What it is about, when it is about something. All optional: plenty of
+  -- what matters in a small business is attached to nothing in the database.
+  order_id        uuid REFERENCES orders(id) ON DELETE SET NULL,
+  product_id      uuid REFERENCES products(id) ON DELETE SET NULL,
+  conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL,
+  account_id      uuid REFERENCES platform_accounts(id) ON DELETE SET NULL,
+  -- Who wrote it: an email, or `the Secretary desk`.
+  author      text NOT NULL,
+  author_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  -- A note the owner wants to keep at the top of the book.
+  pinned      boolean NOT NULL DEFAULT false,
+  -- Which day this is the record of, in the floor's own timezone rather than
+  -- the server's. A date cast off created_at cannot be indexed — timestamptz
+  -- to date depends on the session's TimeZone, so Postgres will not call it
+  -- immutable — and it would be the wrong day anyway for a shop in Manila
+  -- being swept by a server in Virginia.
+  note_date   date NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Manila')::date,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS business_notes_business_idx
+  ON business_notes (business_id, pinned DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS business_notes_order_idx
+  ON business_notes (order_id) WHERE order_id IS NOT NULL;
+
+-- One daily record per floor per day, so a sweep that runs twice does not
+-- write the day down twice.
+CREATE UNIQUE INDEX IF NOT EXISTS business_notes_daily_idx
+  ON business_notes (business_id, note_date)
+  WHERE kind = 'daily';
+
+DROP TRIGGER IF EXISTS business_notes_touch ON business_notes;
+CREATE TRIGGER business_notes_touch
+  BEFORE UPDATE ON business_notes
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 CREATE INDEX IF NOT EXISTS payments_business_idx ON payments (business_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS payments_state_idx ON payments (business_id, state);

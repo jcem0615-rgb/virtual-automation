@@ -27,6 +27,7 @@ import {
 } from './oauth.js';
 import { registerCommerce } from './commerce.js';
 import { registerUploads } from './uploads.js';
+import { registerNotes } from './notes.js';
 import { registerLive } from './live.js';
 import {
   COOKIE_NAME, readCookie, resolveSession, requireUser, scopeFor,
@@ -3173,6 +3174,7 @@ const moduleContext = {
 registerCommerce(app, moduleContext);
 registerLive(app, moduleContext);
 registerUploads(app, moduleContext);
+registerNotes(app, moduleContext);
 
 // -------------------------------------------------------------- errors
 

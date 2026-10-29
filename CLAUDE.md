@@ -18,7 +18,7 @@ reply promised nothing". Do not quietly widen that to another kind of outbound w
 | Path | What it is |
 | --- | --- |
 | `database/schema.sql` | Tables, multi-tenant indexes, NOTIFY triggers. Idempotent. |
-| `database/seed.sql` | Two businesses (`BIZ_ELEC`, `BIZ_ITSOL`), ten agents each. |
+| `database/seed.sql` | Two businesses (`BIZ_ELEC`, `BIZ_ITSOL`), eleven agents each. |
 | `backend/server.js` | Express + Socket.io. REST for the UI and n8n, realtime fan-out. |
 | `backend/db.js` | pg pool, `tx()` helper, reconnecting LISTEN client. |
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
@@ -28,6 +28,7 @@ reply promised nothing". Do not quietly widen that to another kind of outbound w
 | `backend/uploads.js` | Product photos off the device, and the folder they are served from. |
 | `backend/live.js` | Live selling: the basket, the monitor, the claims. |
 | `backend/business-lines.js` | The trades a floor can be opened for. |
+| `backend/notes.js` | The Secretary's book. Internal only — nothing here is sent. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`, `transfer-owner.js`, `preflight.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
@@ -39,6 +40,7 @@ reply promised nothing". Do not quietly widen that to another kind of outbound w
 | `frontend/src/components/LivePanel.jsx` | The yellow basket, the monitor, live claims. |
 | `frontend/src/components/NewOfficeDialog.jsx` | Opening another floor for another trade. |
 | `frontend/src/components/DesksPanel.jsx` | Which desks the floor has, and which it could have back. |
+| `frontend/src/components/NotesPanel.jsx` | The book: notes, minutes, handovers, the daily record. |
 | `frontend/public/` | PWA manifest, service worker and icons. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
@@ -263,6 +265,21 @@ the realtime path depends on triggers.
   AI *and* claiming to be a human, and `bot`, `robot`, `automated` and `human` are in the
   default `escalate_words` — so a buyer who asks who they are talking to gets a person
   rather than an answer from the thing they are asking about. Keep both halves.
+- **A note never leaves the building.** The Secretary desk's book (`notes.js`,
+  `business_notes`) is the one part of this app that writes something and does not file an
+  approval, and that is only safe because a note reaches nobody: there is no channel, no
+  recipient, no dispatch and no workflow on the far side of it. Both halves of that hold
+  it up — it is not gated *because* it is not outbound. So if a note ever grows a way out
+  (mail a handover, post a minute, hand a customer memory to a sender), it stops being a
+  note and goes through the gate like everything else. Do not add a `channel` column, a
+  webhook, or a `registerApprovalType` that sends one.
+- **The daily record is counted, not written.** `POST /api/internal/notes/daily` reads what
+  the floor actually did — approvals resolved, replies sent, buyers who wrote, orders and
+  their total, threads nobody answered — in one SQL statement, and writes only the lines
+  that have something behind them. The model is nowhere near it, because a number a model
+  guessed is worse in a book than no number at all. A quiet day says it was quiet rather
+  than printing a column of noughts, and `(business_id, note_date) WHERE kind = 'daily'`
+  means running the sweep twice rewrites the day instead of filing a second one.
 - **PAUSED always wins.** No side effect (approve, reject, retry) may move a paused agent;
   go through `settleAgent()`.
 - **A desk taken off the floor is not deleted.** `approvals.agent_id` is NOT NULL ON DELETE
@@ -340,14 +357,14 @@ the realtime path depends on triggers.
   handles its own rejection also settles its desk, rather than leaving it `WORKING` for a
   revision that is never coming. Adding a kind means a registration, not another branch in
   the approve and reject routes.
-- Ten desks: `Sales, Marketing, CRM, Payments, Inventory, Logistics, Production, Admin,
-  HR, Security`. `provision_business_agents()` is the only place the layout is decided, and
+- Eleven desks: `Sales, Marketing, CRM, Payments, Inventory, Logistics, Production, Admin,
+  HR, Security, Secretary`. `provision_business_agents()` is the only place the layout is decided, and
   `business-lines.js` renames them for the trade — the departments never change, so every
   rule, workflow and filter that keys off one still works.
 - **Any trade can open a floor, and its desks know that trade.** `BUSINESS_LINES` carries
   29 of them and `general` for the rest; each renames the desks for the work. What a desk
   *knows* comes from `skill_catalogue.business_types`: null means every business needs it
-  (47 of them), a list means only those trades get it (24 more). `provision_business_agents()`
+  (54 of them), a list means only those trades get it (24 more). `provision_business_agents()`
   and `POST /api/agents` both apply that filter, so a desk put back on the floor is the
   desk that left rather than a generic one, and a salon is never offered a builder's job.
   Adding a trade skill is a row, not a code change. Every key in `BUSINESS_LINES` must
@@ -397,8 +414,8 @@ the realtime path depends on triggers.
   wander the aisles, stop dead). Movement is in `step()`; `routeTo()` keeps people walking
   the aisles between desk blocks rather than over them.
 - Tailwind utility classes only; no separate CSS files beyond `index.css`.
-- **A phone gets its own layout out of the same DOM.** Below `lg` the dashboard is six
-  tabs — Queue, Floor, Inbox, Sales, Live, Market — and `onTab(name)` in `App.jsx` returns
+- **A phone gets its own layout out of the same DOM.** Below `lg` the dashboard is seven
+  tabs — Queue, Floor, Inbox, Sales, Live, Market, Book — and `onTab(name)` in `App.jsx` returns
   `hidden lg:block` for everything that is not the open one, so there is one tree rather
   than two layouts to keep in step. It opens on Queue because approving is what the app is
   for. `main` carries `env(safe-area-inset-bottom) + 72px` of bottom padding so the tab bar
@@ -452,6 +469,13 @@ deployment change; it is faster than finding out from a customer.
   recorded `HELD` with `LIVE_CLAIM_NOT_ANSWERED` naming the variable — it must never read
   as a checkout that was sent.
 - `connect_states` rows are swept only by their expiry index, not by a job.
+- Nothing schedules the daily record. `POST /api/internal/notes/daily` exists and is
+  correct, but no workflow calls it, so a deployment that wants the book written every
+  evening has to add a cron node of its own. It is also the one write in the app that
+  does not reach an open dashboard by itself: `business_notes` has no NOTIFY trigger, so
+  the panel picks a new record up on its next load rather than the moment it lands.
+- The book has no date filter and no paging. Searching finds a note; scrolling back
+  through a year of daily records is not something the panel does yet.
 - An uploaded photo is written before the product is saved, so abandoning the form leaves
   the file behind. Nothing sweeps `uploads/`, and deleting a product does not delete its
   pictures — a listing already on a marketplace may still be pointing at them.

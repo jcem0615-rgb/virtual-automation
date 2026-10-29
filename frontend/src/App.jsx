@@ -12,6 +12,7 @@ import PostsPanel from './components/PostsPanel.jsx';
 import ProductsPanel from './components/ProductsPanel.jsx';
 import AccountsPanel from './components/AccountsPanel.jsx';
 import InboxPanel from './components/InboxPanel.jsx';
+import NotesPanel from './components/NotesPanel.jsx';
 import SalesPanel from './components/SalesPanel.jsx';
 import LivePanel from './components/LivePanel.jsx';
 import NewOfficeDialog from './components/NewOfficeDialog.jsx';
@@ -26,6 +27,9 @@ const TABS = [
   { key: 'sales', label: 'Sales', icon: 'M4 19h16M7 16V9m5 7V5m5 11v-4' },
   { key: 'live', label: 'Live', icon: 'M15 10l5-3v10l-5-3v-4zM3 7h12v10H3V7z' },
   { key: 'market', label: 'Market', icon: 'M4 8h16l-1 12H5L4 8zm4 0V6a4 4 0 118 0v2' },
+  // The Secretary's book. Last, because approving is still what the app is
+  // for — but on the bar, because a note nobody can find is not a record.
+  { key: 'notes', label: 'Book', icon: 'M5 4h11l3 3v13H5V4zm3 5h8M8 13h8M8 17h5' },
 ];
 
 const STATUS_PILL = {
@@ -370,6 +374,15 @@ export default function App() {
               agents={floorAgents}
               floor={businesses.find((b) => b.id === floorId) ?? null}
               onSelectAgent={(a) => setSelectedAgentId(a.id)}
+            />
+          </div>
+
+          <div className={onTab('notes')}>
+            <NotesPanel
+              businessId={businessId}
+              refreshKey={changed}
+              isOwner={isOwnerHere}
+              onSignedOut={signedOut}
             />
           </div>
 

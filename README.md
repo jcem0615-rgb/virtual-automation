@@ -173,7 +173,7 @@ gets a 403.
 ## Running this as a platform
 
 A platform operator account lands in the **Control Room**. From there you can open a
-business (which provisions its nine desks), hand its owner an account, suspend or
+business (which provisions its eleven desks), hand its owner an account, suspend or
 restore it, and watch every floor's activity: who is working, what is waiting, how many
 approvals went through, when each office was last busy.
 
@@ -213,8 +213,8 @@ Every desk comes with its department's skills switched on — the Marketing agen
 **social media ads manager**, a content calendar, copywriting, promo planning and
 performance reporting; Sales has lead qualification, quoting, follow-ups, booking and
 upsells; CRM has DM replies, review responses, history recall, escalation triage and
-satisfaction follow-ups; and so on through Inventory, HR, Admin, Logistics, Security and
-Production.
+satisfaction follow-ups; the Secretary keeps the book; and so on through Inventory, HR,
+Admin, Logistics, Security and Production.
 
 Click an agent to see the list. An **owner** can switch any of them off, and that
 changes what the model is asked to do: `/api/internal/agents/checkout` hands n8n the
@@ -446,10 +446,48 @@ What it will not do: it does not understand the buyer, it reads words. Someone f
 words that are not on the list will get a polite automatic answer. Turn it on one channel
 at a time, read the inbox for a few days, and add the words your own buyers actually use.
 
+## The Secretary, and the book
+
+The eleventh desk sits at reception and does the one job nobody else on the floor does:
+it remembers. Open **Book** (a tab on a phone, a panel on the dashboard) and you get the
+business's own record — four kinds of entry, all of them internal:
+
+- **Note** — anything worth remembering. *Supplier rang, galvanised pipe goes up 8% in
+  March, quote before then.*
+- **Minutes** — what was agreed, and by whom.
+- **Handover** — what the next person needs to know to pick this up.
+- **Daily record** — written by the desk itself, once a day.
+
+You write the first three. The **daily record** the Secretary writes on its own, and it
+is counted rather than composed: how many drafts were approved and turned down, how many
+replies went out and how many of those the desk sent by itself, how many buyers wrote,
+how many orders and for how much, and which threads nobody has answered yet. The model
+never sees it, because a figure a model guessed is worse in a book than no figure at all.
+A quiet day says so in a sentence instead of printing a column of noughts. Run it from
+n8n on a schedule:
+
+```bash
+curl -X POST http://localhost:4000/api/internal/notes/daily \
+  -H 'x-internal-token: dev-internal-token' -H 'content-type: application/json' \
+  -d '{"business_id":"<uuid>"}'
+```
+
+Running it twice rewrites the same day's entry rather than filing a second one.
+
+Any note can be **pinned** to the top, corrected, or (an owner only) thrown away — and
+the activity log keeps that it existed either way. A note can be attached to an order, a
+product, a buyer or a shop, and the chips under its heading say so; it cannot be attached
+to another floor's. Search looks through subjects and bodies.
+
+**Nothing in the book is ever sent anywhere.** It has no channel, no recipient and no
+workflow behind it — which is exactly why writing one needs no approval, unlike every
+other thing this app writes. A reviewer can write and correct; only an owner can throw
+away. A paused Secretary desk or a suspended floor answers 423 and files nothing.
+
 ## Adding another business
 
 Two ways. From the Control Room, fill in **Open a new floor** — it creates the business
-and its nine desks and lets you hand the owner an account straight away. Or from the
+and its eleven desks and lets you hand the owner an account straight away. Or from the
 command line:
 
 ```bash
@@ -530,11 +568,12 @@ the realtime path runs on triggers, so mocks prove nothing.
 | Path | What it is |
 | --- | --- |
 | `database/schema.sql` | Tables, multi-tenant indexes, NOTIFY triggers. Idempotent. |
-| `database/seed.sql` | Two businesses (`BIZ_ELEC`, `BIZ_ITSOL`), nine agents each. |
+| `database/seed.sql` | Two businesses (`BIZ_ELEC`, `BIZ_ITSOL`), eleven agents each. |
 | `backend/server.js` | Express + Socket.io. REST for the UI and n8n, realtime fan-out. |
 | `backend/db.js` | pg pool, `tx()` helper, reconnecting LISTEN client. |
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
 | `backend/secrets.js` | Encrypts the marketplace credentials sellers connect. |
+| `backend/notes.js` | The Secretary's book. Internal only — nothing here is sent. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`, `transfer-owner.js`. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/Login.jsx` | Email + password form. |
@@ -542,6 +581,7 @@ the realtime path runs on triggers, so mocks prove nothing.
 | `frontend/src/components/PostsPanel.jsx` | Social posts and the per-platform filter. |
 | `frontend/src/components/ProductsPanel.jsx` | Catalogue and which shops carry each item. |
 | `frontend/src/components/AccountsPanel.jsx` | Connected seller accounts. |
+| `frontend/src/components/NotesPanel.jsx` | The book: notes, minutes, handovers, the daily record. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene: the floor, and the staff who walk it. |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
 | `workflows/*.json` | n8n exports: sales lead, Messenger inbound, dispatch, post sync, product sync, marketplace chat, order sync, live monitor, marketing. |

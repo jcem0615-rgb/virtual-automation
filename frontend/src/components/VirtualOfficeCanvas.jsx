@@ -32,6 +32,7 @@ const SPRITE_COLOURS = {
   staff_red: 0xef4444,
   staff_orange: 0xfb923c,
   staff_emerald: 0x34d399,
+  staff_cyan: 0x22d3ee,
   staff_default: 0x64748b,
 };
 
