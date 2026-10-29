@@ -25,7 +25,22 @@ async function request(path, options = {}) {
       + ' check that it is running and that this site proxies /api to it.');
   }
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  // Every route in this app answers JSON. Anything else did not come from the
+  // backend at all — it is the proxy in front of it saying it could not reach
+  // one, as an HTML or plain-text error page. Parsing that and letting the
+  // parser's complaint reach the sign-in form tells the person nothing they
+  // can act on, so the thing that actually went wrong is said instead.
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new Unreachable('Cannot reach the Virtual Office API.'
+        + ` Something answered ${path} with ${res.status}, but not with JSON —`
+        + ' so it was the proxy, not the backend. Check that the backend is'
+        + ' running and that this site rewrites /api to it.');
+    }
+  }
   if (!res.ok) {
     const message = body?.error ?? `HTTP ${res.status}`;
     const err = res.status === 401 ? new Unauthorized(message) : new Error(message);
