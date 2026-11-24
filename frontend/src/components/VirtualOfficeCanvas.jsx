@@ -233,6 +233,7 @@ class OfficeScene extends Phaser.Scene {
   constructor() {
     super('office');
     this.people = new Map();   // agent id -> person
+    this.serverLights = [];    // the cabinet's LEDs, stepped from the floor
     this.pending = [];         // agents handed over before create() ran
     this.onSelect = null;
     this.spots = [];           // claimable places to stand or sit
@@ -346,6 +347,10 @@ class OfficeScene extends Phaser.Scene {
   drawRoom() {
     for (const child of this.room.list.slice()) child.destroy();
     this.spots = [];
+    // The lights belong to the room that was just destroyed. Dropping them
+    // here rather than trusting drawServer to replace them keeps update()
+    // from reaching into objects Phaser has already torn down.
+    this.serverLights = [];
     this.building = [];
     this.drawFloor();
     for (const object of this.building) this.room.add(object);
@@ -406,6 +411,10 @@ class OfficeScene extends Phaser.Scene {
       this.drawMeetingTable(this.W / 2, 452);
       this.drawFeature(t, 70, 452);
       this.drawGreenery(t);
+      // Against the right-hand wall, between the two desk rows and beside
+      // the water point — which is what this corner of a real small office
+      // looks like. Drawn after the greenery so nothing is planted over it.
+      this.drawServer(this.W - 44, 474);
     }
   }
 
@@ -433,6 +442,14 @@ class OfficeScene extends Phaser.Scene {
     g.fillStyle(t.sky, 0.75).fillRoundedRect(wx - 9, wy - 28, 20, 20, 5);
     this.labelProp(wx, wy + 22, 'water');
     this.spots.push({ x: wx - 52, y: wy + 8, sit: false, takenBy: null });
+
+    // The server stands in the middle of an aisle rather than at its edge:
+    // the two desk columns put a chair under each desk, and at the edge of
+    // a 360px lane the cabinet comes out underneath one. The middle is the
+    // one strip of a phone floor with nothing in it.
+    const taken = new Set([lanes[0], lanes[mid], lanes.at(-1)]);
+    const free = lanes.find((row) => !taken.has(row));
+    this.drawServer(this.W / 2, (free ?? this.H - 86) + 30);
 
     this.plant(g, 34, this.H - 42, 1.2);
     this.plant(g, this.W - 34, this.H - 42, 1.1, true);
@@ -803,7 +820,6 @@ class OfficeScene extends Phaser.Scene {
     // Corner trees, bigger than anything on a desk.
     this.plant(g, 46, this.H - 54, 1.5);
     this.plant(g, this.W - 46, this.H - 54, 1.4, true);
-    this.plant(g, this.W - 44, 418, 1.25);
 
     // A water point, because people walk to one.
     const wx = this.W - 120;
@@ -822,6 +838,57 @@ class OfficeScene extends Phaser.Scene {
       fontFamily: 'ui-monospace, monospace', fontSize: '10px',
       color: this.theme.labelInk, letterSpacing: 2,
     })).setDepth(DEPTH.labels);
+  }
+
+  /**
+   * The server the whole floor shares: where each desk's memory is kept
+   * between jobs, and where it reads from at the start of the next one.
+   *
+   * Every floor gets one, whatever the trade — unlike `drawFeature`, which
+   * is the one piece of kit that says what the business *does*. This says
+   * what the office *is*: eleven desks that remember.
+   *
+   * The lights are not decoration. `this.serverLights` is stepped in
+   * update() from how many desks are actually working, so a busy floor has
+   * a busy server and an idle one sits almost dark. A light that blinked on
+   * a timer would be a lie told sixty times a second.
+   */
+  drawServer(x, y) {
+    const g = this.keep(this.add.graphics()).setDepth(DEPTH.furniture);
+    const t = this.theme;
+
+    // The cabinet. `box()` draws the big face first and hangs a short skirt
+    // below it, so everything on the machine goes on that face — the racks
+    // below used to be laid out past the bottom of it and ended up sitting
+    // on the floorboards.
+    this.box(g, x - 31, y - 78, 62, 70, 16, 0x273243, 0x151d2a, 4);
+
+    // A vented strip across the head of it.
+    g.fillStyle(0x0b111b, 1).fillRoundedRect(x - 26, y - 74, 52, 9, 2);
+    for (let i = 0; i < 7; i += 1) {
+      g.fillStyle(0x3b4759, 0.85).fillRect(x - 23 + i * 7, y - 72, 3, 5);
+    }
+
+    // Four rack units, each with its own row of lights.
+    this.serverLights = [];
+    for (let u = 0; u < 4; u += 1) {
+      const uy = y - 62 + u * 13;
+      g.fillStyle(0x111a27, 1).fillRoundedRect(x - 26, uy, 52, 11, 2);
+      g.fillStyle(0x1e2a3c, 0.9).fillRect(x - 23, uy + 3, 26, 5);
+      for (let i = 0; i < 3; i += 1) {
+        const dot = this.keep(this.add.circle(x + 11 + i * 6, uy + 5.5, 1.8,
+          i === 0 ? 0x34d399 : t.accent));
+        dot.setDepth(DEPTH.furniture + 1).setAlpha(0.25);
+        this.serverLights.push(dot);
+      }
+    }
+
+    // Glass over the front, so it reads as a cabinet and not a crate.
+    g.fillStyle(0x93c5fd, 0.06).fillRoundedRect(x - 28, y - 66, 56, 58, 3);
+    g.lineStyle(1, 0x5b6b84, 0.45).strokeRoundedRect(x - 28, y - 66, 56, 58, 3);
+    g.lineStyle(0, 0, 0);
+
+    this.labelProp(x + 1, y + 12, 'server');
   }
 
   labelProp(x, y, text) {
@@ -1132,6 +1199,30 @@ class OfficeScene extends Phaser.Scene {
     const dt = Math.min(delta, 50) / 1000;
     for (const person of this.people.values()) this.step(person, time, dt);
     this.separate(time, dt);
+    this.stepServer(time);
+  }
+
+  /**
+   * The cabinet's lights, driven by what the floor is actually doing rather
+   * than by a timer: a desk reads its memory when it picks a job up and
+   * writes to it when it learns something, so the server is busy exactly
+   * when the desks are. An idle floor leaves it almost dark, which is the
+   * honest picture — and the reason it is worth drawing at all.
+   */
+  stepServer(time) {
+    if (!this.serverLights.length) return;
+    let working = 0;
+    for (const person of this.people.values()) {
+      if (person.data?.status === 'WORKING') working += 1;
+    }
+    // Something always ticks over, or a quiet floor looks unplugged.
+    const floor = 0.18;
+    const busy = Math.min(1, working / 3);
+    for (let i = 0; i < this.serverLights.length; i += 1) {
+      // Each light on its own offset, so they chase rather than flash as one.
+      const wave = Math.sin(time / (260 - busy * 170) + i * 1.7) * 0.5 + 0.5;
+      this.serverLights[i].setAlpha(floor + wave * (0.22 + busy * 0.6));
+    }
   }
 
   step(person, time, dt) {

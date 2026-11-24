@@ -15,6 +15,8 @@ export default function ApprovalModal({
 }) {
   const [feedback, setFeedback] = useState('');
   const [rejecting, setRejecting] = useState(false);
+  // Whether the reason is kept for next time. On by default; see the tick.
+  const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [skillBusy, setSkillBusy] = useState(null);
@@ -23,6 +25,7 @@ export default function ApprovalModal({
   useEffect(() => {
     setFeedback('');
     setRejecting(false);
+    setRemember(true);
     setError(null);
     setRemoving(false);
   }, [approval?.id, agent?.id]);
@@ -115,19 +118,39 @@ export default function ApprovalModal({
               </div>
 
               {rejecting && (
-                <label className="block">
-                  <span className="text-sm text-slate-300">
-                    What should change? This goes back to the model with the draft.
-                  </span>
-                  <textarea
-                    autoFocus
-                    rows={3}
-                    value={feedback}
-                    onChange={(e) => setFeedback(e.target.value)}
-                    placeholder="Too formal — mention the ₱ rate and keep it to three sentences."
-                    className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm text-slate-100 outline-none focus:border-amber-500"
-                  />
-                </label>
+                <div className="space-y-2">
+                  <label className="block">
+                    <span className="text-sm text-slate-300">
+                      What should change? This goes back to the model with the draft.
+                    </span>
+                    <textarea
+                      autoFocus
+                      rows={3}
+                      value={feedback}
+                      onChange={(e) => setFeedback(e.target.value)}
+                      placeholder="Too formal — mention the ₱ rate and keep it to three sentences."
+                      className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm text-slate-100 outline-none focus:border-amber-500"
+                    />
+                  </label>
+                  {/* Ticked by default: a reviewer typing why a draft is
+                      wrong is nearly always stating a rule the business
+                      works by, and without this it shapes one revision and
+                      is then lost. Untick it for the genuinely one-off no. */}
+                  <label className="flex items-start gap-2 text-xs text-slate-400">
+                    <input
+                      id="remember-this"
+                      type="checkbox"
+                      checked={remember}
+                      onChange={(e) => setRemember(e.target.checked)}
+                      className="mt-0.5 accent-cyan-500"
+                    />
+                    <span>
+                      Keep this on the server so {agent.name} remembers it next time.
+                      It goes into every future draft from this desk until somebody
+                      forgets it.
+                    </span>
+                  </label>
+                </div>
               )}
             </>
           ) : (
@@ -230,7 +253,8 @@ export default function ApprovalModal({
             <>
               <button
                 disabled={busy !== null || feedback.trim() === ''}
-                onClick={() => run('reject', () => onReject(approval.id, feedback.trim()))}
+                onClick={() => run('reject',
+                  () => onReject(approval.id, feedback.trim(), remember))}
                 className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
               >
                 {busy === 'reject' ? 'Sending back…' : 'Send back for revision'}

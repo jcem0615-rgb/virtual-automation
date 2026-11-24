@@ -69,10 +69,13 @@ export const api = {
     return request(`/api/approvals?${params}`);
   },
   approve: (id) => request(`/api/approvals/${id}/approve`, { method: 'POST' }),
-  reject: (id, feedback) =>
+  // `remember` carries the reviewer's tick: keep this reason on the server so
+  // the desk has it next time, or treat it as a one-off. The backend defaults
+  // it to true, so an older caller that omits it still teaches the desk.
+  reject: (id, feedback, remember = true) =>
     request(`/api/approvals/${id}/reject`, {
       method: 'POST',
-      body: JSON.stringify({ feedback }),
+      body: JSON.stringify({ feedback, remember }),
     }),
   posts: (businessId, platform = 'all') => {
     const params = new URLSearchParams();
@@ -187,6 +190,23 @@ export const api = {
   editNote: (id, body) =>
     request(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteNote: (id) => request(`/api/notes/${id}`, { method: 'DELETE' }),
+  // The server room: what each desk has learnt, and what checkout hands it
+  // at the start of every run. Not outbound — a memory is read into a
+  // prompt, never sent — so there is no publish and no approval here either.
+  memory: (businessId, { agentId, kind = 'all', q: term } = {}) => {
+    const params = new URLSearchParams();
+    if (businessId && businessId !== 'all') params.set('business_id', businessId);
+    if (agentId) params.set('agent_id', agentId);
+    if (kind && kind !== 'all') params.set('kind', kind);
+    if (term) params.set('q', term);
+    return request(`/api/memory?${params}`);
+  },
+  teach: (body) =>
+    request('/api/memory', { method: 'POST', body: JSON.stringify(body) }),
+  editMemory: (id, body) =>
+    request(`/api/memory/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  forget: (id) => request(`/api/memory/${id}`, { method: 'DELETE' }),
+
   replyRules: (businessId) => request(`/api/reply-rules${scope(businessId)}`),
   setReplyRule: (id, body) =>
     request(`/api/reply-rules/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),

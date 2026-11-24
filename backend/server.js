@@ -28,6 +28,7 @@ import {
 import { registerCommerce } from './commerce.js';
 import { registerUploads } from './uploads.js';
 import { registerNotes } from './notes.js';
+import { registerMemory, readMemory, rememberRejection } from './memory.js';
 import { registerLive } from './live.js';
 import {
   COOKIE_NAME, readCookie, resolveSession, requireUser, scopeFor,
@@ -751,6 +752,10 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
   const user = req.user;
   const feedback = String(req.body?.feedback ?? '').trim();
   if (!feedback) throw new HttpError(400, 'feedback is required when rejecting');
+  // A reviewer typing why a draft is wrong is nearly always stating a rule
+  // this business works by, so the desk keeps it by default and the modal
+  // offers the way out. Opting out is for the genuinely one-off no.
+  const remember = req.body?.remember !== false;
 
   const outcome = await tx(async (client) => {
     const { rows } = await client.query(
@@ -783,9 +788,25 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
       action: 'REJECT_TASK',
       actor: user.email,
       actorUserId: user.id,
-      detail: { feedback, agent_paused: agent === null },
+      detail: { feedback, agent_paused: agent === null, remembered: remember },
     });
-    return { ...approval, retried: agent !== null };
+
+    // The part that makes a no worth more than one revision: without this
+    // the reason goes into the next prompt and then nowhere, and the desk
+    // writes the same thing again next week.
+    if (remember) {
+      await rememberRejection(client, { approval, feedback, actor: user.email });
+      await logAction(client, {
+        businessId: approval.business_id,
+        agentId: approval.agent_id,
+        approvalId: approval.id,
+        action: 'MEMORY_LEARNED',
+        actor: user.email,
+        actorUserId: user.id,
+        detail: { kind: 'correction', subject: approval.payload_json?.title ?? null },
+      });
+    }
+    return { ...approval, retried: agent !== null, remembered: remember };
   });
 
   if (!outcome) {
@@ -806,7 +827,8 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
         console.error(`[${payload.type}] rollback failed:`, err.message);
         return { rollback: 'failed' };
       });
-    res.json({ ok: true, approval_id: outcome.id, ...(said ?? {}) });
+    res.json({ ok: true, approval_id: outcome.id, remembered: outcome.remembered,
+      ...(said ?? {}) });
     return;
   }
 
@@ -833,7 +855,7 @@ app.post('/api/approvals/:id/reject', wrap(async (req, res) => {
     }
   }
 
-  res.json({ ok: true, approval_id: outcome.id, retry });
+  res.json({ ok: true, approval_id: outcome.id, remembered: outcome.remembered, retry });
 }));
 
 // KILL_SWITCH — pause wins unconditionally; resume only lifts a pause.
@@ -2553,8 +2575,15 @@ app.post('/api/internal/agents/checkout', wrap(async (req, res) => {
     return;
   }
   // The enabled skills go back with the agent so n8n can shape the prompt
-  // around what this desk is actually meant to do.
-  res.json({ ok: true, agent: result.agent, skills: await readEnabledSkills(result.agent.id) });
+  // around what this desk is actually meant to do — and, beside them, what
+  // it has learnt from the jobs before this one. Skills are what the desk
+  // can do; memory is what it knows about this particular business, and a
+  // desk without it starts every run as a stranger.
+  const [skills, memory] = await Promise.all([
+    readEnabledSkills(result.agent.id),
+    readMemory(q, result.agent.id),
+  ]);
+  res.json({ ok: true, agent: result.agent, skills, memory });
 }));
 
 /** File a draft for human review. */
@@ -3175,6 +3204,7 @@ registerCommerce(app, moduleContext);
 registerLive(app, moduleContext);
 registerUploads(app, moduleContext);
 registerNotes(app, moduleContext);
+registerMemory(app, moduleContext);
 
 // -------------------------------------------------------------- errors
 

@@ -446,6 +446,46 @@ What it will not do: it does not understand the buyer, it reads words. Someone f
 words that are not on the list will get a polite automatic answer. Turn it on one channel
 at a time, read the inbox for a few days, and add the words your own buyers actually use.
 
+## The server, and what the desks remember
+
+Until now a desk started every job knowing two things: the skills its department has
+switched on, and the request in front of it. That was all. You could turn the same draft
+down every week with the same sentence and it would write it again, because the sentence
+went into one revision and then nowhere.
+
+There is a **server** in the office now — you can see it on the floor, against the
+right-hand wall, lights going when the desks are busy — and each desk keeps what it
+has learnt on it. Open **Floor** and the panel under the desks shows the lot.
+
+Three kinds:
+
+- **Fact** — something true about the business. *Delivery to Cavite is two working days.*
+- **Preference** — how you want the work done. *Open in Tagalog unless the buyer wrote in English.*
+- **Correction** — what a reviewer said when they turned a draft down.
+
+**Corrections write themselves.** When you reject a draft, the box has *Keep this so the
+desk remembers it next time* ticked. Leave it ticked and your reason is on the server
+before the revision is even written; from then on every draft that desk produces is built
+with it. Untick it for the genuinely one-off no — wrong customer, my mistake.
+
+You can also teach a desk directly, and telling it the same thing twice replaces the old
+version rather than stacking two — so correcting a price is just saying the new one.
+
+Each desk's chip shows how much it holds against the cap (`2/40`). A run carries at most
+forty, pinned first, then whatever has been useful most recently. Past that nothing is
+deleted — it stays on the server and stays on screen, it just is not read into the next
+job. **Pin** what must always be carried. Only an **owner** can **forget** something,
+because it changes every future draft from that desk.
+
+What it will not do: it does not work out which memories are *relevant* to the job in
+front of it. Every run gets the same top forty, so a desk answering about delivery still
+carries what it learnt about pricing. And nothing ages a memory out — `used_count` on
+each row tells you which ones no prompt has ever needed, but you are the one who decides.
+
+**Nothing on the server is ever sent anywhere.** A memory is read into a prompt, never
+dispatched — which is why writing one needs no approval. What the desk writes *next* is
+outbound and goes through the queue exactly as before.
+
 ## The Secretary, and the book
 
 The eleventh desk sits at reception and does the one job nobody else on the floor does:
@@ -574,6 +614,7 @@ the realtime path runs on triggers, so mocks prove nothing.
 | `backend/auth.js` | scrypt passwords, Postgres-backed sessions, tenant scope. |
 | `backend/secrets.js` | Encrypts the marketplace credentials sellers connect. |
 | `backend/notes.js` | The Secretary's book. Internal only — nothing here is sent. |
+| `backend/memory.js` | The office server: what each desk remembers between runs. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`, `transfer-owner.js`. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/Login.jsx` | Email + password form. |
@@ -582,6 +623,7 @@ the realtime path runs on triggers, so mocks prove nothing.
 | `frontend/src/components/ProductsPanel.jsx` | Catalogue and which shops carry each item. |
 | `frontend/src/components/AccountsPanel.jsx` | Connected seller accounts. |
 | `frontend/src/components/NotesPanel.jsx` | The book: notes, minutes, handovers, the daily record. |
+| `frontend/src/components/MemoryPanel.jsx` | The server: what the desks have learnt. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene: the floor, and the staff who walk it. |
 | `frontend/src/components/ApprovalModal.jsx` | Approve / Reject / Emergency Pause. |
 | `workflows/*.json` | n8n exports: sales lead, Messenger inbound, dispatch, post sync, product sync, marketplace chat, order sync, live monitor, marketing. |

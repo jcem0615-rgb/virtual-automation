@@ -29,6 +29,7 @@ reply promised nothing". Do not quietly widen that to another kind of outbound w
 | `backend/live.js` | Live selling: the basket, the monitor, the claims. |
 | `backend/business-lines.js` | The trades a floor can be opened for. |
 | `backend/notes.js` | The Secretary's book. Internal only — nothing here is sent. |
+| `backend/memory.js` | The office server: what each desk remembers between runs. |
 | `backend/scripts/` | `create-user.js`, `reset-password.js`, `transfer-owner.js`, `preflight.js`. There is no sign-up page. |
 | `frontend/src/Login.jsx` | Email + password form. |
 | `frontend/src/ControlRoom.jsx` | Platform operator's portal. Activity only, never content. |
@@ -41,6 +42,7 @@ reply promised nothing". Do not quietly widen that to another kind of outbound w
 | `frontend/src/components/NewOfficeDialog.jsx` | Opening another floor for another trade. |
 | `frontend/src/components/DesksPanel.jsx` | Which desks the floor has, and which it could have back. |
 | `frontend/src/components/NotesPanel.jsx` | The book: notes, minutes, handovers, the daily record. |
+| `frontend/src/components/MemoryPanel.jsx` | The server: what the desks have learnt, and the cap. |
 | `frontend/public/` | PWA manifest, service worker and icons. |
 | `frontend/src/App.jsx` | Header filter, pending list, state, socket wiring. |
 | `frontend/src/components/VirtualOfficeCanvas.jsx` | Phaser scene (office floor, avatars). |
@@ -98,13 +100,18 @@ the realtime path depends on triggers.
    conversation first and then claims the `CRM` desk. A marketplace chat does
    the same through `workflow_marketplace_chat.json`, so all five chat channels
    reach the desk by one route and show up in one inbox.
+   Checkout answers with the desk's enabled **skills** and its **memory** —
+   what it has learnt on this floor, capped at `MEMORY_LIMIT`. Skills are what
+   the desk can do; memory is what it knows about this particular business.
 3. n8n asks Ollama for a draft, then `POST /api/internal/approvals` → row is `PENDING`,
    agent becomes `AWAITING_APPROVAL`.
 4. Postgres triggers `NOTIFY`; `server.js` re-reads the row and emits to Socket.io rooms.
 5. A signed-in human clicks the avatar and approves or rejects:
    - `APPROVE_TASK` → row `APPROVED`, backend calls the n8n dispatch webhook.
    - `REJECT_TASK` → row `REJECTED` with feedback, backend re-calls the lead webhook with
-     `feedback` + `previous_draft` so the model revises.
+     `feedback` + `previous_draft` so the model revises — and, unless the reviewer
+     unticked it, writes that feedback to the desk's memory as a `correction`, so the
+     same no does not have to be given twice.
    - `KILL_SWITCH` → agent `PAUSED` (or resumed with `resume: true`).
 
 ## Rules that must keep holding
@@ -280,6 +287,32 @@ the realtime path depends on triggers.
   guessed is worse in a book than no number at all. A quiet day says it was quiet rather
   than printing a column of noughts, and `(business_id, note_date) WHERE kind = 'daily'`
   means running the sweep twice rewrites the day instead of filing a second one.
+- **A desk remembers, and the server is where.** `agent_memory` is what checkout hands
+  n8n beside the skills: `fact` (something true about this business), `preference` (how
+  the people here want it done), `correction` (what a reviewer said when they turned a
+  draft down). Two things hold it up and both are load-bearing. **It is not outbound** —
+  a memory is read into a prompt and never sent, so like a note it has no channel, no
+  recipient and no dispatch, and must never grow one. What the desk writes *next* is
+  still outbound and still goes through the gate; that is the whole reason memory is
+  safe to have. **It is bounded** — `readMemory()` hands over at most `MEMORY_LIMIT`
+  rows, pinned first, then most recently used. Nothing is deleted to make room: a row
+  past the cap stays on the server and stays on screen, it is just not read into the
+  next job, and the panel names the desks that are over it. An unbounded table here is
+  a prompt that grows until the model stops reading the end of it.
+- **Writing is an upsert on the subject.** `(agent_id, lower(subject))` is unique, so a
+  desk told the same thing three times holds one row and the newest telling wins — which
+  is what you want when a price changes, and what keeps the cap spent on distinct things.
+- **A no is worth more than one revision.** `POST /api/approvals/:id/reject` writes the
+  feedback to the desk as a `correction` unless the reviewer unticks *remember this*
+  (`remember: false`). Without it the reason shapes one retry and is then lost, and the
+  desk writes the same wrong thing next week. The tick is on by default because a
+  reviewer typing why a draft is wrong is nearly always stating a rule the business works
+  by; the way out is there for the genuinely one-off no.
+- **Learning is gated like working.** `POST /api/internal/agents/:id/memory` returns 423
+  for a paused desk and for a suspended floor, before it writes anything. If a desk is
+  not allowed to work it is not allowed to learn. Teaching from the dashboard needs a
+  session on that floor; **forgetting is an owner's call**, like throwing a note away,
+  because it changes what every future draft from that desk is built on.
 - **PAUSED always wins.** No side effect (approve, reject, retry) may move a paused agent;
   go through `settleAgent()`.
 - **A desk taken off the floor is not deleted.** `approvals.agent_id` is NOT NULL ON DELETE
@@ -476,6 +509,23 @@ deployment change; it is faster than finding out from a customer.
   the panel picks a new record up on its next load rather than the moment it lands.
 - The book has no date filter and no paging. Searching finds a note; scrolling back
   through a year of daily records is not something the panel does yet.
+- Nothing ages a memory out. A row that has not been read into a prompt in six months
+  sits there scoring against the cap, and the only way it leaves is an owner forgetting
+  it. `used_count` and `last_used_at` are on the row and on screen so the dead ones can
+  be spotted, but nothing acts on them — a sweep that forgot things by itself is a
+  product decision, not a refactor.
+- Memory is a flat list, not a retrieval. Every run gets the same top `MEMORY_LIMIT`
+  rows whatever the job in front of it, so a Sales desk answering about delivery still
+  carries what it learnt about pricing. Picking the relevant ones would need embeddings
+  and a second model call; the cap plus an owner reading the panel is the honest
+  mitigation for now.
+- Nothing stops a desk learning something wrong. A reviewer who rejects with a careless
+  sentence has taught the desk that sentence, and it will shape every draft until
+  somebody forgets it. The panel is the mitigation: it shows what was learnt, from whom,
+  and whether it has ever been used.
+- No workflow writes memory yet. `POST /api/internal/agents/:id/memory` exists and is
+  tested, but the shipped workflows do not call it, so today every memory comes from a
+  person — directly, or through a rejection.
 - An uploaded photo is written before the product is saved, so abandoning the form leaves
   the file behind. Nothing sweeps `uploads/`, and deleting a product does not delete its
   pictures — a listing already on a marketplace may still be pointing at them.

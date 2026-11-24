@@ -13,6 +13,7 @@ import ProductsPanel from './components/ProductsPanel.jsx';
 import AccountsPanel from './components/AccountsPanel.jsx';
 import InboxPanel from './components/InboxPanel.jsx';
 import NotesPanel from './components/NotesPanel.jsx';
+import MemoryPanel from './components/MemoryPanel.jsx';
 import SalesPanel from './components/SalesPanel.jsx';
 import LivePanel from './components/LivePanel.jsx';
 import NewOfficeDialog from './components/NewOfficeDialog.jsx';
@@ -444,6 +445,15 @@ export default function App() {
                   onChanged={() => load(businessId)}
                 />
               </div>
+              <div className={onTab('floor')}>
+                <MemoryPanel
+                  businessId={businessId}
+                  agents={agents}
+                  refreshKey={changed}
+                  isOwner={isOwnerHere}
+                  onSignedOut={signedOut}
+                />
+              </div>
             </>
           )}
 
@@ -585,7 +595,7 @@ export default function App() {
           onClose={() => setSelectedAgentId(null)}
           canPause={(user.roles?.[selectedAgent.business_id] ?? null) === 'owner'}
           onApprove={(id) => act(() => api.approve(id))}
-          onReject={(id, feedback) => act(() => api.reject(id, feedback))}
+          onReject={(id, feedback, remember) => act(() => api.reject(id, feedback, remember))}
           onKill={(agentId, resume) => act(() => api.kill(agentId, resume))}
           onToggleSkill={(agentId, key, enabled) => act(async () => {
             const result = await api.setSkill(agentId, key, enabled);

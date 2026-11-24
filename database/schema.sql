@@ -1307,6 +1307,76 @@ CREATE TRIGGER business_notes_touch
   BEFORE UPDATE ON business_notes
   FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
+-- ------------------------------------------------- what the desks remember
+-- The server in the office: where a desk's memory is kept between runs.
+--
+-- Until now a desk started every job knowing two things — the skills its
+-- department has switched on, and the request in front of it. It could draft
+-- the same wrong answer every week and never learn, because nothing it was
+-- told survived the run. Rejecting a draft with "we do not do same-day" put
+-- that sentence in one prompt and then threw it away.
+--
+-- So each desk gets rows here, and checkout hands them to n8n beside the
+-- skills. Three kinds, because they are learnt in three different ways and
+-- a person reading the list needs to know which is which:
+--   fact       something true about this business
+--   preference how the people here want the work done
+--   correction what a reviewer said when they turned a draft down
+--
+-- Two rules hold this up, and both matter.
+--
+--   It is not outbound. A memory is read into a prompt and never sent
+--   anywhere, exactly like a note. There is no channel here and there must
+--   never be one.
+--
+--   It is bounded. Everything in here is read into every prompt that desk
+--   builds, so an unbounded table is a prompt that grows until the model
+--   stops reading it and the deployment pays for the privilege. `memory.js`
+--   hands over at most MEMORY_LIMIT rows, pinned first.
+CREATE TABLE IF NOT EXISTS agent_memory (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  -- Whose memory it is. ON DELETE CASCADE rather than SET NULL, unlike a
+  -- note: a note about an order still reads when its desk is gone, but a
+  -- memory with no desk to build a prompt for is nothing but noise. Agent
+  -- rows are never actually deleted (`removed_at`), so a desk taken off the
+  -- floor and put back finds its memory where it left it.
+  agent_id    uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  kind        text NOT NULL DEFAULT 'fact'
+              CHECK (kind IN ('fact','preference','correction')),
+  subject     text NOT NULL,
+  body        text NOT NULL,
+  -- Where it came from, so a line in a prompt can be traced back to the
+  -- rejection or the person it came from rather than appearing by magic.
+  learned_from   text NOT NULL DEFAULT 'a person',
+  approval_id    uuid REFERENCES approvals(id) ON DELETE SET NULL,
+  conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL,
+  -- Kept past the cap, however old it gets.
+  pinned      boolean NOT NULL DEFAULT false,
+  -- How often it has actually been handed to a prompt. A memory with a used
+  -- count that never moves is one nobody needed.
+  used_count  integer NOT NULL DEFAULT 0,
+  last_used_at timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS agent_memory_business_idx
+  ON agent_memory (business_id, pinned DESC, created_at DESC);
+-- What checkout reads, in the order it reads it.
+CREATE INDEX IF NOT EXISTS agent_memory_agent_idx
+  ON agent_memory (agent_id, pinned DESC, last_used_at DESC NULLS LAST, created_at DESC);
+-- The same thing learnt twice is one memory, not two, so writing is an
+-- upsert on the subject. Case-folded, because "Delivery area" and "delivery
+-- area" are the same fact told by two different runs.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_memory_subject_idx
+  ON agent_memory (agent_id, lower(subject));
+
+DROP TRIGGER IF EXISTS agent_memory_touch ON agent_memory;
+CREATE TRIGGER agent_memory_touch
+  BEFORE UPDATE ON agent_memory
+  FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
 CREATE INDEX IF NOT EXISTS payments_business_idx ON payments (business_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS payments_state_idx ON payments (business_id, state);
 CREATE INDEX IF NOT EXISTS payouts_business_idx ON payouts (business_id, created_at DESC);
